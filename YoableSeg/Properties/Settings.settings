@@ -1,4 +1,4 @@
-﻿<?xml version='1.0' encoding='utf-8'?>
+<?xml version='1.0' encoding='utf-8'?>
 <SettingsFile xmlns="http://schemas.microsoft.com/VisualStudio/2004/01/settings" CurrentProfile="(Default)" GeneratedClassNamespace="Properties" GeneratedClassName="Settings">
   <Profiles />
   <Settings>
@@ -94,6 +94,47 @@
     </Setting>
     <Setting Name="LastModelDirectory" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
+    </Setting>
+    <Setting Name="PolygonFillOpacity" Type="System.Double" Scope="User">
+      <Value Profile="(Default)">30</Value>
+    </Setting>
+    <Setting Name="PolygonSimplificationTolerance" Type="System.Double" Scope="User">
+      <Value Profile="(Default)">0</Value>
+    </Setting>
+    <Setting Name="EnableHoverPreview" Type="System.Boolean" Scope="User">
+      <Value Profile="(Default)">False</Value>
+    </Setting>
+    <Setting Name="HoverPreviewOpacity" Type="System.Double" Scope="User">
+      <Value Profile="(Default)">20</Value>
+    </Setting>
+    <Setting Name="HoverThrottleMs" Type="System.Int32" Scope="User">
+      <Value Profile="(Default)">500</Value>
+    </Setting>
+    <Setting Name="ClickDragThreshold" Type="System.Double" Scope="User">
+      <Value Profile="(Default)">3</Value>
+    </Setting>
+    <Setting Name="TextThreshold" Type="System.Single" Scope="User">
+      <Value Profile="(Default)">0.25</Value>
+    </Setting>
+    <Setting Name="BoxThreshold" Type="System.Single" Scope="User">
+      <Value Profile="(Default)">0.25</Value>
+    </Setting>
+    <Setting Name="MaxInstancesPerImage" Type="System.Int32" Scope="User">
+      <Value Profile="(Default)">50</Value>
+    </Setting>
+    <Setting Name="PythonPath" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
+    <Setting Name="PythonServicePort" Type="System.Int32" Scope="User">
+      <Value Profile="(Default)">58000</Value>
+    </Setting>
+    <Setting Name="LastAutoLabelPrompts" Type="System.String" Scope="User">
+      <Value Profile="(Default)">humanoid character
+human-shaped body
+player character</Value>
+    </Setting>
+    <Setting Name="MinSam3Confidence" Type="System.Single" Scope="User">
+      <Value Profile="(Default)">0.6</Value>
     </Setting>
   </Settings>
 </SettingsFile>

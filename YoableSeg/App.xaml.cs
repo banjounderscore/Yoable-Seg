@@ -1,6 +1,7 @@
-﻿using System.Configuration;
+using System.Configuration;
 using System.Data;
 using System.Windows;
+using YoableSeg.Managers;
 
 namespace YoableSeg
 {
@@ -16,6 +17,15 @@ namespace YoableSeg
             // Show the startup window (combined splash screen and project selector)
             var startupWindow = new StartupWindow();
             startupWindow.Show();
+        }
+
+        protected override void OnExit(ExitEventArgs e)
+        {
+            // Ensure Python service is stopped when application exits
+            PythonServiceManager.Instance?.StopService();
+            PythonServiceManager.Instance?.Dispose();
+            
+            base.OnExit(e);
         }
     }
 }

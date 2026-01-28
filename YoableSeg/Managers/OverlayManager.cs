@@ -1,4 +1,4 @@
-﻿using System.Windows;
+using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 
@@ -98,6 +98,17 @@ namespace YoableSeg.Managers
             });
         }
 
+        public void Show(string message, bool showCancel = false)
+        {
+            mainWindow.Dispatcher.Invoke(() =>
+            {
+                overlayLabel.Text = message;
+                overlayProgressBar.Visibility = Visibility.Collapsed;
+                cancelButton.Visibility = showCancel ? Visibility.Visible : Visibility.Collapsed;
+                overlayGrid.Visibility = Visibility.Visible;
+            });
+        }
+
         public void ShowOverlayWithProgress(string message, CancellationTokenSource tokenSource)
         {
             mainWindow.Dispatcher.Invoke(() =>
@@ -128,6 +139,14 @@ namespace YoableSeg.Managers
         }
 
         public void HideOverlay()
+        {
+            mainWindow.Dispatcher.Invoke(() =>
+            {
+                overlayGrid.Visibility = Visibility.Collapsed;
+            });
+        }
+
+        public void Hide()
         {
             mainWindow.Dispatcher.Invoke(() =>
             {

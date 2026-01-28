@@ -6,16 +6,40 @@ using System.Windows;
 namespace YoableSeg.Models
 {
     /// <summary>
-    /// Represents all data for a Yoable project
+    /// Represents all data for a YoableSeg project (segmentation/polygon labels)
     /// </summary>
     public class ProjectData
     {
+        public const string CurrentVersion = "2.0";
+        public const string MinimumSupportedVersion = "2.0";
+
         public string ProjectName { get; set; }
-        public string ProjectPath { get; set; }  // Full path to the .yoable file
-        public string ProjectFolder { get; set; }  // Folder containing the project file
+        public string ProjectPath { get; set; }
+        public string ProjectFolder { get; set; }
         public DateTime CreatedDate { get; set; }
         public DateTime LastModified { get; set; }
-        public string Version { get; set; } = "1.0";
+        public string Version { get; set; } = CurrentVersion;
+
+        public static bool IsVersionSupported(string version)
+        {
+            if (string.IsNullOrEmpty(version)) return false;
+            
+            if (!System.Version.TryParse(version, out var projectVersion))
+                return false;
+            
+            if (!System.Version.TryParse(MinimumSupportedVersion, out var minVersion))
+                return false;
+
+            return projectVersion >= minVersion;
+        }
+
+        public static string GetVersionError(string version)
+        {
+            return $"This project uses an incompatible format (v{version}).\n\n" +
+                   $"YoableSeg requires segmentation projects (v{MinimumSupportedVersion}+).\n\n" +
+                   "Projects created with the original Yoable (box labels) cannot be opened.\n" +
+                   "Please create a new project for segmentation work.";
+        }
 
         // Class definitions for multi-class labeling
         public List<LabelClass> Classes { get; set; } = new List<LabelClass>();

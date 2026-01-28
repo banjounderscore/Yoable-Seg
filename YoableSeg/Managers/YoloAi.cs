@@ -1,10 +1,12 @@
-﻿using Microsoft.ML.OnnxRuntime;
+using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using System.Drawing.Imaging;
 using System.Windows;
 using System.Drawing;
 using System.IO;
+using OpenCvSharp;
 using Point = System.Drawing.Point;
+using WpfPoint = System.Windows.Point;
 
 namespace YoableSeg.Managers
 {
@@ -39,6 +41,7 @@ namespace YoableSeg.Managers
     public class Detection
     {
         public Rectangle Box { get; set; }
+        public List<WpfPoint> Polygon { get; set; }
         public float Confidence { get; }
         public float ClassConfidence { get; }
         public int ClassId { get; }
@@ -51,6 +54,23 @@ namespace YoableSeg.Managers
             Confidence = confidence;
             ClassConfidence = classConfidence;
             ClassId = classId;
+            Polygon = null;
+        }
+
+        public Detection(List<WpfPoint> polygon, float confidence, float classConfidence = 1.0f, int classId = 0)
+        {
+            Polygon = polygon;
+            Confidence = confidence;
+            ClassConfidence = classConfidence;
+            ClassId = classId;
+            if (polygon != null && polygon.Count >= 3)
+            {
+                double minX = polygon.Min(p => p.X);
+                double minY = polygon.Min(p => p.Y);
+                double maxX = polygon.Max(p => p.X);
+                double maxY = polygon.Max(p => p.Y);
+                Box = new Rectangle((int)minX, (int)minY, (int)(maxX - minX), (int)(maxY - minY));
+            }
         }
     }
 
@@ -67,7 +87,8 @@ namespace YoableSeg.Managers
     {
         Unknown,
         YoloV5,      // [batch, num_detections, 5+num_classes]
-        YoloV8       // [batch, 4+num_classes, num_detections]
+        YoloV8,      // [batch, 4+num_classes, num_detections]
+        YoloV8Seg    // Segmentation model with mask prototypes
     }
 
     public class YoloModelInfo
@@ -78,6 +99,10 @@ namespace YoableSeg.Managers
         public int NumDetections { get; set; }
         public int ModelInputSize { get; set; }
         public bool HasObjectness { get; set; }
+        public int NumMaskCoefficients { get; set; } = 32;
+        public int MaskProtoHeight { get; set; } = 160;
+        public int MaskProtoWidth { get; set; } = 160;
+        public bool IsSegmentation { get; set; } = false;
     }
 
     public class YoloModel
@@ -179,8 +204,9 @@ namespace YoableSeg.Managers
         {
             try
             {
-                var modelOutput = session.OutputMetadata.First();
-                int[] shape = modelOutput.Value.Dimensions.ToArray();
+                var outputs = session.OutputMetadata.ToList();
+                var firstOutput = outputs[0];
+                int[] shape = firstOutput.Value.Dimensions.ToArray();
 
                 var info = new YoloModelInfo
                 {
@@ -188,60 +214,76 @@ namespace YoableSeg.Managers
                     Format = YoloFormat.Unknown
                 };
 
-                // Handle dynamic dimensions (-1)
                 for (int i = 0; i < shape.Length; i++)
                 {
                     if (shape[i] == -1)
                     {
-                        // Common defaults for dynamic dimensions
-                        if (i == 0) shape[i] = 1; // Batch size
-                        else if (i == shape.Length - 1) shape[i] = 8400; // Common detection count
+                        if (i == 0) shape[i] = 1;
+                        else if (i == shape.Length - 1) shape[i] = 8400;
+                    }
+                }
+
+                bool hasMultipleOutputs = outputs.Count >= 2;
+                bool hasProtoOutput = false;
+                int[] protoShape = null;
+
+                if (hasMultipleOutputs)
+                {
+                    foreach (var output in outputs.Skip(1))
+                    {
+                        var outShape = output.Value.Dimensions.ToArray();
+                        if (outShape.Length == 4 && outShape[1] == 32)
+                        {
+                            hasProtoOutput = true;
+                            protoShape = outShape;
+                            break;
+                        }
                     }
                 }
 
                 if (shape.Length == 3)
                 {
-                    // Determine format by comparing middle vs last dimension
-                    // YOLOv8: [batch, features, detections] - features is small, detections is large
-                    // YOLOv5: [batch, detections, features] - detections is large, features is small to medium
-
-                    // If middle dimension is significantly smaller than last dimension, it's YOLOv8
-                    if (shape[1] < 100 && shape[2] > 1000)
+                    if (shape[1] < 200 && shape[2] > 1000)
                     {
-                        // YOLOv8 format: [batch, 4+num_classes, num_detections]
-                        info.Format = YoloFormat.YoloV8;
                         info.NumDetections = shape[2];
-                        info.NumClasses = shape[1] - 4; // x, y, w, h, then classes (no objectness)
                         info.HasObjectness = false;
-                        info.ModelInputSize = 640; // Default
+                        info.ModelInputSize = 640;
 
-                        // Reject segmentation models (they have extra outputs beyond standard detection)
-                        if (shape[1] > 84) // Standard COCO is 80 classes, so 84 = 4 box coords + 80 classes
+                        if (hasProtoOutput || shape[1] > 84)
                         {
-                            info.Format = YoloFormat.Unknown;
-                            return info; // This will be rejected as unsupported
+                            info.Format = YoloFormat.YoloV8Seg;
+                            info.IsSegmentation = true;
+                            info.NumMaskCoefficients = 32;
+                            info.NumClasses = shape[1] - 4 - info.NumMaskCoefficients;
+
+                            if (protoShape != null)
+                            {
+                                info.MaskProtoHeight = protoShape[2] == -1 ? 160 : protoShape[2];
+                                info.MaskProtoWidth = protoShape[3] == -1 ? 160 : protoShape[3];
+                            }
+                        }
+                        else
+                        {
+                            info.Format = YoloFormat.YoloV8;
+                            info.NumClasses = shape[1] - 4;
                         }
                     }
-                    // If middle dimension is large and last dimension is small to medium, it's YOLOv5
-                    else if (shape[1] > 100 && shape[2] < 100)
+                    else if (shape[1] > 100 && shape[2] < 200)
                     {
-                        // YOLOv5 format: [batch, num_detections, 5+num_classes]
                         info.Format = YoloFormat.YoloV5;
                         info.NumDetections = shape[1];
-                        info.NumClasses = shape[2] - 5; // x, y, w, h, objectness, then classes
+                        info.NumClasses = shape[2] - 5;
                         info.HasObjectness = true;
-                        info.ModelInputSize = 640; // Default
+                        info.ModelInputSize = 640;
                     }
                 }
 
-                // Try to detect input size from input metadata
                 var inputMeta = session.InputMetadata.FirstOrDefault();
                 if (inputMeta.Value != null)
                 {
                     var inputShape = inputMeta.Value.Dimensions.ToArray();
                     if (inputShape.Length >= 4)
                     {
-                        // Assume format: [batch, channels, height, width]
                         int height = inputShape[2] == -1 ? 640 : inputShape[2];
                         int width = inputShape[3] == -1 ? 640 : inputShape[3];
                         info.ModelInputSize = Math.Max(height, width);
@@ -851,8 +893,8 @@ namespace YoableSeg.Managers
                     MessageBox.Show("Failed to detect YOLO model format or unsupported model type.\n\n" +
                                   "Supported formats:\n" +
                                   "- YOLOv5: [batch, detections, 5+classes]\n" +
-                                  "- YOLOv8: [batch, 4+classes, detections]\n\n" +
-                                  "Note: Segmentation models are not supported.",
+                                  "- YOLOv8: [batch, 4+classes, detections]\n" +
+                                  "- YOLOv8-seg / YOLOv26-seg: Segmentation models",
                                   "Unsupported Model", MessageBoxButton.OK, MessageBoxImage.Error);
                     return;
                 }
@@ -864,15 +906,21 @@ namespace YoableSeg.Managers
                 {
                     YoloFormat.YoloV5 => "YOLOv5",
                     YoloFormat.YoloV8 => "YOLOv8",
+                    YoloFormat.YoloV8Seg => "YOLOv26-seg",
                     _ => "Unknown"
                 };
+
+                string segInfo = modelInfo.IsSegmentation
+                    ? $"\nMask Coefficients: {modelInfo.NumMaskCoefficients}\nMask Size: {modelInfo.MaskProtoHeight}x{modelInfo.MaskProtoWidth}"
+                    : "";
 
                 MessageBox.Show($"Model '{model.Name}' loaded successfully.\n" +
                               $"Format: {formatName}\n" +
                               $"Classes: {modelInfo.NumClasses}\n" +
                               $"Detections: {modelInfo.NumDetections}\n" +
-                              $"Input Size: {modelInfo.ModelInputSize}x{modelInfo.ModelInputSize}\n" +
-                              $"Total models: {loadedModels.Count}",
+                              $"Input Size: {modelInfo.ModelInputSize}x{modelInfo.ModelInputSize}" +
+                              segInfo +
+                              $"\nTotal models: {loadedModels.Count}",
                     "Model Loaded", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             catch (Exception ex)
@@ -925,6 +973,197 @@ namespace YoableSeg.Managers
         public void Dispose()
         {
             ClearAllModels();
+        }
+
+        public List<(List<WpfPoint> polygon, int classId, float score)> RunSegmentationInference(Bitmap image)
+        {
+            if (loadedModels.Count == 0) return new List<(List<WpfPoint>, int, float)>();
+
+            var segModels = loadedModels.Where(m => m.ModelInfo.IsSegmentation).ToList();
+            if (segModels.Count == 0) return new List<(List<WpfPoint>, int, float)>();
+
+            return RunSegmentationModel(image, segModels[0]);
+        }
+
+        private List<(List<WpfPoint> polygon, int classId, float score)> RunSegmentationModel(Bitmap image, YoloModel model)
+        {
+            var results = new List<(List<WpfPoint>, int, float)>();
+
+            try
+            {
+                Bitmap processedImage = ConvertTo24bpp(image);
+                Bitmap resizedImage = ResizeImageForModel(processedImage, model.ModelInfo.ModelInputSize);
+
+                float[] inputArray = BitmapToFloatArray(resizedImage);
+                var inputTensor = new DenseTensor<float>(inputArray,
+                    new int[] { 1, 3, model.ModelInfo.ModelInputSize, model.ModelInfo.ModelInputSize });
+
+                var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("images", inputTensor) };
+
+                using var modelResults = model.Session.Run(inputs, model.OutputNames);
+                var outputs = modelResults.ToList();
+
+                if (outputs.Count < 2)
+                {
+                    if (processedImage != image) processedImage.Dispose();
+                    resizedImage.Dispose();
+                    return results;
+                }
+
+                var detectionOutput = outputs[0].AsTensor<float>();
+                var protoOutput = outputs[1].AsTensor<float>();
+
+                float confidenceThreshold = Properties.Settings.Default.AIConfidence;
+                float scaleX = (float)image.Width / model.ModelInfo.ModelInputSize;
+                float scaleY = (float)image.Height / model.ModelInfo.ModelInputSize;
+
+                int numDetections = model.ModelInfo.NumDetections;
+                int numClasses = model.ModelInfo.NumClasses;
+                int numMaskCoeffs = model.ModelInfo.NumMaskCoefficients;
+
+                var detections = new List<(float[] box, float score, int classId, float[] maskCoeffs)>();
+
+                for (int i = 0; i < numDetections; i++)
+                {
+                    float maxClassConf = 0;
+                    int classId = 0;
+                    for (int c = 0; c < numClasses; c++)
+                    {
+                        float classConf = detectionOutput[0, 4 + c, i];
+                        if (classConf > maxClassConf)
+                        {
+                            maxClassConf = classConf;
+                            classId = c;
+                        }
+                    }
+
+                    if (maxClassConf < confidenceThreshold) continue;
+
+                    float cx = detectionOutput[0, 0, i];
+                    float cy = detectionOutput[0, 1, i];
+                    float w = detectionOutput[0, 2, i];
+                    float h = detectionOutput[0, 3, i];
+
+                    float[] maskCoeffs = new float[numMaskCoeffs];
+                    for (int m = 0; m < numMaskCoeffs; m++)
+                    {
+                        maskCoeffs[m] = detectionOutput[0, 4 + numClasses + m, i];
+                    }
+
+                    detections.Add((new float[] { cx, cy, w, h }, maxClassConf, classId, maskCoeffs));
+                }
+
+                detections = detections.OrderByDescending(d => d.score).Take(50).ToList();
+
+                int protoH = model.ModelInfo.MaskProtoHeight;
+                int protoW = model.ModelInfo.MaskProtoWidth;
+
+                foreach (var det in detections)
+                {
+                    float[] mask = new float[protoH * protoW];
+                    for (int y = 0; y < protoH; y++)
+                    {
+                        for (int x = 0; x < protoW; x++)
+                        {
+                            float sum = 0;
+                            for (int m = 0; m < numMaskCoeffs; m++)
+                            {
+                                sum += det.maskCoeffs[m] * protoOutput[0, m, y, x];
+                            }
+                            mask[y * protoW + x] = 1.0f / (1.0f + (float)Math.Exp(-sum));
+                        }
+                    }
+
+                    float boxScaleX = (float)model.ModelInfo.ModelInputSize / protoW;
+                    float boxScaleY = (float)model.ModelInfo.ModelInputSize / protoH;
+
+                    float x1 = (det.box[0] - det.box[2] / 2) / boxScaleX;
+                    float y1 = (det.box[1] - det.box[3] / 2) / boxScaleY;
+                    float x2 = (det.box[0] + det.box[2] / 2) / boxScaleX;
+                    float y2 = (det.box[1] + det.box[3] / 2) / boxScaleY;
+
+                    int bx1 = Math.Max(0, (int)x1);
+                    int by1 = Math.Max(0, (int)y1);
+                    int bx2 = Math.Min(protoW - 1, (int)x2);
+                    int by2 = Math.Min(protoH - 1, (int)y2);
+
+                    byte[,] binaryMask = new byte[protoH, protoW];
+                    for (int y = by1; y <= by2; y++)
+                    {
+                        for (int x = bx1; x <= bx2; x++)
+                        {
+                            if (mask[y * protoW + x] > 0.5f)
+                            {
+                                binaryMask[y, x] = 255;
+                            }
+                        }
+                    }
+
+                    var polygon = MaskToPolygon(binaryMask, protoW, protoH, scaleX * boxScaleX, scaleY * boxScaleY);
+
+                    if (polygon != null && polygon.Count >= 3)
+                    {
+                        results.Add((polygon, det.classId, det.score));
+                    }
+                }
+
+                if (processedImage != image) processedImage.Dispose();
+                resizedImage.Dispose();
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Segmentation inference error: {ex.Message}");
+            }
+
+            return results;
+        }
+
+        private List<WpfPoint> MaskToPolygon(byte[,] mask, int width, int height, float scaleX, float scaleY)
+        {
+            try
+            {
+                Mat matMask = new Mat(height, width, MatType.CV_8UC1);
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        matMask.Set(y, x, mask[y, x]);
+                    }
+                }
+
+                OpenCvSharp.Point[][] contours;
+                HierarchyIndex[] hierarchy;
+                Cv2.FindContours(matMask, out contours, out hierarchy, RetrievalModes.External, ContourApproximationModes.ApproxSimple);
+
+                if (contours.Length == 0)
+                {
+                    matMask.Dispose();
+                    return null;
+                }
+
+                var largest = contours.OrderByDescending(c => Cv2.ContourArea(c)).First();
+
+                double tolerance = Properties.Settings.Default.PolygonSimplificationTolerance;
+                var simplified = Cv2.ApproxPolyDP(largest, tolerance, true);
+
+                var polygon = new List<WpfPoint>();
+                foreach (var pt in simplified)
+                {
+                    polygon.Add(new WpfPoint(pt.X * scaleX, pt.Y * scaleY));
+                }
+
+                matMask.Dispose();
+                return polygon.Count >= 3 ? polygon : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public bool HasSegmentationModel()
+        {
+            return loadedModels.Any(m => m.ModelInfo.IsSegmentation);
         }
     }
 }

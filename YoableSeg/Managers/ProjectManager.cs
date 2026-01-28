@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -94,7 +94,6 @@ namespace YoableSeg.Managers
                 string backupFolder = Path.Combine(projectFolder, BACKUP_FOLDER);
                 Directory.CreateDirectory(backupFolder);
 
-                // Initialize project data
                 CurrentProject = new ProjectData
                 {
                     ProjectName = projectName,
@@ -102,6 +101,7 @@ namespace YoableSeg.Managers
                     ProjectFolder = projectFolder,
                     CreatedDate = DateTime.Now,
                     LastModified = DateTime.Now,
+                    Version = ProjectData.CurrentVersion,
                     Classes = new List<LabelClass> 
                     { 
                         new LabelClass("default", "#E57373", 0) 
@@ -161,6 +161,17 @@ namespace YoableSeg.Managers
                         "Load Error",
                         MessageBoxButton.OK,
                         MessageBoxImage.Error);
+                    return false;
+                }
+
+                if (!ProjectData.IsVersionSupported(CurrentProject.Version))
+                {
+                    MessageBox.Show(
+                        ProjectData.GetVersionError(CurrentProject.Version ?? "unknown"),
+                        "Incompatible Project Version",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Error);
+                    CurrentProject = null;
                     return false;
                 }
 
@@ -310,7 +321,6 @@ namespace YoableSeg.Managers
                 lastSaveTime = DateTime.Now;
                 hasUnsavedChanges = false;
 
-                Debug.WriteLine($"Project saved successfully: {CurrentProject.ProjectPath}");
                 return true;
             }
             catch (Exception ex)
@@ -499,7 +509,6 @@ namespace YoableSeg.Managers
                 if (File.Exists(CurrentProject.ProjectPath))
                 {
                     await Task.Run(() => File.Copy(CurrentProject.ProjectPath, backupPath, true));
-                    Debug.WriteLine($"Backup created: {backupPath}");
                 }
 
                 // Clean up old backups
@@ -533,7 +542,6 @@ namespace YoableSeg.Managers
                         foreach (var file in filesToDelete)
                         {
                             file.Delete();
-                            Debug.WriteLine($"Deleted old backup: {file.Name}");
                         }
                     }
                 }

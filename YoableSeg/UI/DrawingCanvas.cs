@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -11,36 +11,91 @@ namespace YoableSeg
     public class LabelData
     {
         public string Name { get; set; }
-        public Rect Rect { get; set; }
-        public int ClassId { get; set; } = 0; // Default class
+        public List<Point> Points { get; set; } = new();
+        public int ClassId { get; set; } = 0;
 
-        public LabelData(string name, Rect rect, int classId = 0)
+        public LabelData(string name, List<Point> points, int classId = 0)
         {
             Name = name;
-            Rect = rect;
+            Points = points ?? new List<Point>();
             ClassId = classId;
         }
 
-        // Deep copy constructor
         public LabelData(LabelData source)
         {
             Name = source.Name;
-            Rect = source.Rect;
+            Points = source.Points.Select(p => new Point(p.X, p.Y)).ToList();
             ClassId = source.ClassId;
+        }
+
+        public Rect GetBoundingBox()
+        {
+            if (Points == null || Points.Count == 0)
+                return Rect.Empty;
+
+            double minX = Points.Min(p => p.X);
+            double minY = Points.Min(p => p.Y);
+            double maxX = Points.Max(p => p.X);
+            double maxY = Points.Max(p => p.Y);
+
+            return new Rect(minX, minY, maxX - minX, maxY - minY);
+        }
+
+        public bool ContainsPoint(Point testPoint)
+        {
+            if (Points == null || Points.Count < 3)
+                return false;
+
+            bool inside = false;
+            int j = Points.Count - 1;
+
+            for (int i = 0; i < Points.Count; i++)
+            {
+                if ((Points[i].Y < testPoint.Y && Points[j].Y >= testPoint.Y ||
+                     Points[j].Y < testPoint.Y && Points[i].Y >= testPoint.Y) &&
+                    (Points[i].X <= testPoint.X || Points[j].X <= testPoint.X))
+                {
+                    if (Points[i].X + (testPoint.Y - Points[i].Y) / (Points[j].Y - Points[i].Y) * (Points[j].X - Points[i].X) < testPoint.X)
+                    {
+                        inside = !inside;
+                    }
+                }
+                j = i;
+            }
+
+            return inside;
+        }
+
+        public bool IsValid()
+        {
+            return Points != null && Points.Count >= 3;
+        }
+
+        public void Translate(double dx, double dy)
+        {
+            for (int i = 0; i < Points.Count; i++)
+            {
+                Points[i] = new Point(Points[i].X + dx, Points[i].Y + dy);
+            }
+        }
+
+        public List<Point> ScalePoints(double scaleX, double scaleY)
+        {
+            return Points.Select(p => new Point(p.X * scaleX, p.Y * scaleY)).ToList();
         }
     }
 
 
     public class DrawingCanvas : Canvas
     {
-        // Event fired whenever labels are modified
         public event EventHandler LabelsChanged;
+        public event Func<Point, Rect?, Task<List<Point>>> RequestSamMask;
 
         public ImageSource Image { get; set; }
         private Size originalImageDimensions;
+        private Rect imageDisplayRect;
         public List<LabelData> Labels { get; set; } = new();
         public LabelData SelectedLabel { get; set; }
-        // Class management
         public int CurrentClassId { get; set; } = 0;
         public event EventHandler<int> CurrentClassChanged;
         private List<LabelClass> availableClasses = new List<LabelClass>();
@@ -49,7 +104,6 @@ namespace YoableSeg
         {
             availableClasses = classes ?? new List<LabelClass>();
 
-            // If current class doesn't exist in new list, switch to first class
             if (availableClasses.Any() && !availableClasses.Any(c => c.ClassId == CurrentClassId))
             {
                 CurrentClassId = availableClasses.First().ClassId;
@@ -60,51 +114,39 @@ namespace YoableSeg
         public string GetCurrentClassColor()
         {
             var currentClass = availableClasses.FirstOrDefault(c => c.ClassId == CurrentClassId);
-            return currentClass?.ColorHex ?? "#E57373"; // Fallback to red
+            return currentClass?.ColorHex ?? "#E57373";
         }
 
         protected virtual void OnCurrentClassChanged()
         {
             CurrentClassChanged?.Invoke(this, CurrentClassId);
-            InvalidateVisual(); // Redraw to show new color while drawing
+            InvalidateVisual();
         }
 
-        // Multi-selection support
         public HashSet<LabelData> SelectedLabels { get; set; } = new();
-
-        // Copy/Paste support
         private static List<LabelData> clipboard = new();
-
-        // Undo/Redo support
         private Stack<List<LabelData>> undoStack = new();
         private Stack<List<LabelData>> redoStack = new();
         private const int MaxUndoSteps = 20;
 
         public ListBox LabelListBox { get; set; }
         public Rect CurrentRect { get; set; }
-        public bool IsDrawing { get; set; }
+        public bool IsDrawingBox { get; set; }
         public bool IsDragging { get; set; }
-        public bool IsResizing { get; set; }
+        public bool IsWaitingForSam { get; set; }
         public Point cursorPosition { get; set; } = new Point(0, 0);
         public Point StartPoint { get; set; }
         public Point DragStart { get; set; }
         public Matrix TransformMatrix { get; set; } = Matrix.Identity;
 
-        private const double resizeHandleSize = 4;
-
+        private const double ClickDragThreshold = 3.0;
         private double zoomFactor = 1.0;
         private const double zoomStep = 0.1;
         private Point zoomCenter = new Point(0, 0);
         private Matrix transformMatrix = Matrix.Identity;
+        private bool hasMovedPolygons = false;
+        private bool mouseDownOnEmpty = false;
 
-        private ResizeHandleType resizeHandleType;
-        private bool hasMovedOrResized = false; // Track if actual movement occurred
-
-        private enum ResizeHandleType
-        {
-            None, TopLeft, TopRight, BottomLeft, BottomRight,
-            Left, Right, Top, Bottom
-        }
 
         public DrawingCanvas()
         {
@@ -117,8 +159,6 @@ namespace YoableSeg
             MouseUp += DrawingCanvas_MouseUp;
             MouseDown += DrawingCanvas_MouseDown;
             MouseLeave += DrawingCanvas_MouseLeave;
-
-            // Use PreviewKeyDown to catch events before they're handled elsewhere
             PreviewKeyDown += DrawingCanvas_PreviewKeyDown;
         }
 
@@ -231,44 +271,29 @@ namespace YoableSeg
             }
         }
 
-        // Paste labels
         private void PasteLabels()
         {
             if (clipboard.Count == 0) return;
 
             SaveUndoState();
-
-            // Clear current selection
             SelectedLabels.Clear();
 
-            // Calculate offset for pasted labels (slight offset from original position)
             double offsetX = 20;
             double offsetY = 20;
 
             foreach (var clipboardLabel in clipboard)
             {
-                // Create new label with unique name
-                var newLabel = new LabelData($"Label {Labels.Count + 1}",
-                    new Rect(
-                        clipboardLabel.Rect.X + offsetX,
-                        clipboardLabel.Rect.Y + offsetY,
-                        clipboardLabel.Rect.Width,
-                        clipboardLabel.Rect.Height
-                    ),
-                    CurrentClassId); // Use current class
+                var offsetPoints = clipboardLabel.Points.Select(p => new Point(p.X + offsetX, p.Y + offsetY)).ToList();
+                var newLabel = new LabelData($"Label {Labels.Count + 1}", offsetPoints, CurrentClassId);
 
                 Labels.Add(newLabel);
                 SelectedLabels.Add(newLabel);
             }
 
-            // Update UI
             RefreshLabelListBox();
             InvalidateVisual();
-
-            // Notify that labels changed
             OnLabelsChanged();
 
-            // Update title
             if (Application.Current.MainWindow is MainWindow mainWindow)
             {
                 mainWindow.Title = $"YoableSeg - Pasted {clipboard.Count} label(s)";
@@ -293,22 +318,81 @@ namespace YoableSeg
             zoomFactor = 1.0;
             transformMatrix = Matrix.Identity;
             RenderTransform = new MatrixTransform(transformMatrix);
+            CalculateImageDisplayRect();
             InvalidateVisual();
         }
 
         private Rect ScaleRectToCanvas(Rect originalRect)
         {
-            if (Image == null) return originalRect;
+            if (Image == null || imageDisplayRect.Width == 0) return originalRect;
 
-            double scaleX = ActualWidth / originalImageDimensions.Width;
-            double scaleY = ActualHeight / originalImageDimensions.Height;
+            double scaleX = imageDisplayRect.Width / originalImageDimensions.Width;
+            double scaleY = imageDisplayRect.Height / originalImageDimensions.Height;
 
             return new Rect(
-                originalRect.X * scaleX,
-                originalRect.Y * scaleY,
+                originalRect.X * scaleX + imageDisplayRect.X,
+                originalRect.Y * scaleY + imageDisplayRect.Y,
                 originalRect.Width * scaleX,
                 originalRect.Height * scaleY
             );
+        }
+
+        private List<Point> ScalePolygonToCanvas(List<Point> imagePoints)
+        {
+            if (Image == null || imagePoints == null || imageDisplayRect.Width == 0) return imagePoints;
+
+            double scaleX = imageDisplayRect.Width / originalImageDimensions.Width;
+            double scaleY = imageDisplayRect.Height / originalImageDimensions.Height;
+
+            return imagePoints.Select(p => new Point(
+                p.X * scaleX + imageDisplayRect.X,
+                p.Y * scaleY + imageDisplayRect.Y
+            )).ToList();
+        }
+
+        private Point ScalePointToImage(Point canvasPoint)
+        {
+            if (Image == null || imageDisplayRect.Width == 0) return canvasPoint;
+
+            double scaleX = originalImageDimensions.Width / imageDisplayRect.Width;
+            double scaleY = originalImageDimensions.Height / imageDisplayRect.Height;
+            
+            return new Point(
+                (canvasPoint.X - imageDisplayRect.X) * scaleX,
+                (canvasPoint.Y - imageDisplayRect.Y) * scaleY
+            );
+        }
+
+        private Rect ScaleRectToImage(Rect canvasRect)
+        {
+            if (Image == null || imageDisplayRect.Width == 0) return canvasRect;
+
+            double scaleX = originalImageDimensions.Width / imageDisplayRect.Width;
+            double scaleY = originalImageDimensions.Height / imageDisplayRect.Height;
+            
+            return new Rect(
+                (canvasRect.X - imageDisplayRect.X) * scaleX,
+                (canvasRect.Y - imageDisplayRect.Y) * scaleY,
+                canvasRect.Width * scaleX,
+                canvasRect.Height * scaleY
+            );
+        }
+
+        private StreamGeometry CreatePolygonGeometry(List<Point> points)
+        {
+            var geometry = new StreamGeometry();
+            if (points == null || points.Count < 3) return geometry;
+
+            using (var ctx = geometry.Open())
+            {
+                ctx.BeginFigure(points[0], true, true);
+                for (int i = 1; i < points.Count; i++)
+                {
+                    ctx.LineTo(points[i], true, false);
+                }
+            }
+            geometry.Freeze();
+            return geometry;
         }
 
         public void LoadImage(string imagePath, Size originalDimensions)
@@ -330,6 +414,45 @@ namespace YoableSeg
             undoStack.Clear();
             redoStack.Clear();
             LabelListBox?.Items.Clear();
+            
+            CalculateImageDisplayRect();
+            InvalidateVisual();
+        }
+
+        private void CalculateImageDisplayRect()
+        {
+            if (Image == null || ActualWidth == 0 || ActualHeight == 0)
+            {
+                imageDisplayRect = new Rect(0, 0, 0, 0);
+                return;
+            }
+
+            double imageAspect = originalImageDimensions.Width / originalImageDimensions.Height;
+            double containerAspect = ActualWidth / ActualHeight;
+
+            double displayWidth, displayHeight;
+            double offsetX = 0, offsetY = 0;
+
+            if (imageAspect > containerAspect)
+            {
+                displayWidth = ActualWidth;
+                displayHeight = ActualWidth / imageAspect;
+                offsetY = (ActualHeight - displayHeight) / 2;
+            }
+            else
+            {
+                displayHeight = ActualHeight;
+                displayWidth = ActualHeight * imageAspect;
+                offsetX = (ActualWidth - displayWidth) / 2;
+            }
+
+            imageDisplayRect = new Rect(offsetX, offsetY, displayWidth, displayHeight);
+        }
+
+        protected override void OnRenderSizeChanged(SizeChangedInfo sizeInfo)
+        {
+            base.OnRenderSizeChanged(sizeInfo);
+            CalculateImageDisplayRect();
             InvalidateVisual();
         }
 
@@ -337,57 +460,65 @@ namespace YoableSeg
         {
             base.OnRender(dc);
 
-            if (Image != null)
+            if (Image != null && imageDisplayRect.Width > 0 && imageDisplayRect.Height > 0)
             {
-                dc.DrawImage(Image, new Rect(0, 0, ActualWidth, ActualHeight));
+                dc.DrawRectangle(Brushes.Black, null, new Rect(0, 0, ActualWidth, ActualHeight));
+                dc.DrawImage(Image, imageDisplayRect);
             }
 
-            // Draw existing labels with their class colors
             double thickness = Properties.Settings.Default.LabelThickness;
-            
+            double fillOpacity = Properties.Settings.Default.PolygonFillOpacity / 100.0;
+
             foreach (var label in Labels)
             {
-                // Get color for this label's class
+                if (!label.IsValid()) continue;
+
                 var labelClass = availableClasses.FirstOrDefault(c => c.ClassId == label.ClassId);
-                string colorHex = labelClass?.ColorHex ?? "#E57373"; // Fallback
+                string colorHex = labelClass?.ColorHex ?? "#E57373";
 
                 var color = (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(colorHex);
-                
-                // Check if this label is selected
                 bool isSelected = SelectedLabels.Contains(label) || label == SelectedLabel;
-                
-                // FIXED: For selected labels, brighten the color instead of using yellow
+
                 if (isSelected)
                 {
-                    // Brighten the color by increasing RGB values
                     color.R = (byte)Math.Min(255, color.R + 60);
                     color.G = (byte)Math.Min(255, color.G + 60);
                     color.B = (byte)Math.Min(255, color.B + 60);
                 }
-                
-                var brush = new SolidColorBrush(color);
-                var pen = new Pen(brush, isSelected ? thickness + 1 : thickness);
 
-                // Convert stored image coordinates to canvas coordinates for display
-                Rect scaledRect = ScaleRectToCanvas(label.Rect);
+                var scaledPoints = ScalePolygonToCanvas(label.Points);
+                var geometry = CreatePolygonGeometry(scaledPoints);
 
-                // Draw the rectangle
-                dc.DrawRectangle(null, pen, scaledRect);
+                var fillColor = color;
+                fillColor.A = (byte)(255 * fillOpacity);
+                var fillBrush = new SolidColorBrush(fillColor);
+                var strokeBrush = new SolidColorBrush(color);
+                var pen = new Pen(strokeBrush, isSelected ? thickness + 1 : thickness);
 
-                if (isSelected)
-                {
-                    DrawResizeHandles(dc, label.Rect);
-                }
+                dc.DrawGeometry(fillBrush, pen, geometry);
             }
 
-            // Draw the current rectangle being drawn with current class color
-            if (IsDrawing)
+            if (IsDrawingBox)
             {
                 string currentColorHex = GetCurrentClassColor();
-                var currentBrush = new SolidColorBrush(
-                    (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(currentColorHex));
-                var currentPen = new Pen(currentBrush, thickness);
-                dc.DrawRectangle(null, currentPen, CurrentRect);
+                var currentColor = (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(currentColorHex);
+                var currentBrush = new SolidColorBrush(currentColor);
+                var dashPen = new Pen(currentBrush, thickness);
+                dashPen.DashStyle = DashStyles.Dash;
+                dc.DrawRectangle(null, dashPen, CurrentRect);
+            }
+
+            if (IsWaitingForSam)
+            {
+                var loadingText = new FormattedText(
+                    "Processing...",
+                    System.Globalization.CultureInfo.CurrentCulture,
+                    FlowDirection.LeftToRight,
+                    new Typeface("Segoe UI"),
+                    14,
+                    Brushes.White,
+                    VisualTreeHelper.GetDpi(this).PixelsPerDip);
+                dc.DrawText(loadingText, new Point(10, 10));
             }
 
             if (Properties.Settings.Default.EnableCrosshair)
@@ -396,43 +527,17 @@ namespace YoableSeg
             }
         }
 
-        private void DrawResizeHandles(DrawingContext dc, Rect rect)
-        {
-            // Convert the rect to canvas coordinates before drawing handles
-            Rect scaledRect = ScaleRectToCanvas(rect);
-
-            // Adjust handle size based on zoom factor
-            double s = resizeHandleSize * Math.Sqrt(zoomFactor) / zoomFactor;
-
-            // Create handles with adjusted size
-            Rect[] handles =
-            {
-                new Rect(scaledRect.Left - s, scaledRect.Top - s, s * 2, s * 2), // Top Left
-                new Rect(scaledRect.Right - s, scaledRect.Top - s, s * 2, s * 2), // Top Right
-                new Rect(scaledRect.Left - s, scaledRect.Bottom - s, s * 2, s * 2), // Bottom Left
-                new Rect(scaledRect.Right - s, scaledRect.Bottom - s, s * 2, s * 2), // Bottom Right
-                new Rect(scaledRect.Left - s, scaledRect.Top + scaledRect.Height / 2 - s, s * 2, s * 2), // Left
-                new Rect(scaledRect.Right - s, scaledRect.Top + scaledRect.Height / 2 - s, s * 2, s * 2), // Right
-                new Rect(scaledRect.Left + scaledRect.Width / 2 - s, scaledRect.Top - s, s * 2, s * 2), // Top
-                new Rect(scaledRect.Left + scaledRect.Width / 2 - s, scaledRect.Bottom - s, s * 2, s * 2) // Bottom
-            };
-
-            foreach (var handle in handles)
-            {
-                dc.DrawRectangle(Brushes.Black, null, handle);
-            }
-        }
 
         private void DrawCrosshair(DrawingContext dc)
         {
-            if (cursorPosition == new Point(0, 0)) return;
+            if (cursorPosition == new Point(0, 0) || imageDisplayRect.Width == 0) return;
 
             var colorBrush = (SolidColorBrush)(new BrushConverter().ConvertFrom(Properties.Settings.Default.CrosshairColor));
             double crosshairSize = Properties.Settings.Default.CrosshairSize;
 
             Pen crosshairPen = new Pen(colorBrush, crosshairSize);
-            dc.DrawLine(crosshairPen, new Point(0, cursorPosition.Y), new Point(ActualWidth, cursorPosition.Y));
-            dc.DrawLine(crosshairPen, new Point(cursorPosition.X, 0), new Point(cursorPosition.X, ActualHeight));
+            dc.DrawLine(crosshairPen, new Point(imageDisplayRect.Left, cursorPosition.Y), new Point(imageDisplayRect.Right, cursorPosition.Y));
+            dc.DrawLine(crosshairPen, new Point(cursorPosition.X, imageDisplayRect.Top), new Point(cursorPosition.X, imageDisplayRect.Bottom));
         }
 
         private void DrawingCanvas_MouseWheel(object sender, MouseWheelEventArgs e)
@@ -485,8 +590,8 @@ namespace YoableSeg
                 return;
             }
 
-            // PRIORITY 2: If we're currently drawing, cycle through classes
-            if (IsDrawing && availableClasses.Count > 1)
+            // PRIORITY 2: If we're currently drawing a box, cycle through classes
+            if (IsDrawingBox && availableClasses.Count > 1)
             {
                 int currentIndex = availableClasses.FindIndex(c => c.ClassId == CurrentClassId);
 
@@ -565,107 +670,161 @@ namespace YoableSeg
         private void DrawingCanvas_MouseMove(object sender, MouseEventArgs e)
         {
             cursorPosition = e.GetPosition(this);
-            InvalidateVisual();
 
-            if (IsDrawing)
+            if (mouseDownOnEmpty && !IsDrawingBox && !IsDragging)
             {
-                var canvasRect = new Rect(
-                    Math.Min(StartPoint.X, cursorPosition.X),
-                    Math.Min(StartPoint.Y, cursorPosition.Y),
-                    Math.Abs(cursorPosition.X - StartPoint.X),
-                    Math.Abs(cursorPosition.Y - StartPoint.Y)
-                );
+                double distance = Math.Sqrt(
+                    Math.Pow(cursorPosition.X - StartPoint.X, 2) +
+                    Math.Pow(cursorPosition.Y - StartPoint.Y, 2));
 
-                CurrentRect = canvasRect;
+                if (distance > ClickDragThreshold)
+                {
+                    IsDrawingBox = true;
+                }
+            }
+
+            if (IsDrawingBox)
+            {
+                Point clampedCursor = ClampToBounds(cursorPosition);
+                CurrentRect = new Rect(
+                    Math.Min(StartPoint.X, clampedCursor.X),
+                    Math.Min(StartPoint.Y, clampedCursor.Y),
+                    Math.Abs(clampedCursor.X - StartPoint.X),
+                    Math.Abs(clampedCursor.Y - StartPoint.Y)
+                );
+                InvalidateVisual();
                 return;
             }
 
-            if (SelectedLabel == null && SelectedLabels.Count == 0) return;
-
-            if (IsResizing && SelectedLabel != null)
+            if (IsDragging && (SelectedLabel != null || SelectedLabels.Count > 0))
             {
-                // Save undo state on first movement
-                if (!hasMovedOrResized)
-                {
-                    SaveUndoState();
-                    hasMovedOrResized = true;
-                }
-                ResizeLabel(SelectedLabel, resizeHandleType, e.GetPosition(this));
-            }
-            else if (IsDragging)
-            {
-                double dx = cursorPosition.X - DragStart.X;
-                double dy = cursorPosition.Y - DragStart.Y;
+                Point clampedCursor = ClampToBounds(cursorPosition);
+                double dx = clampedCursor.X - DragStart.X;
+                double dy = clampedCursor.Y - DragStart.Y;
 
-                // Only process if there's actual movement
                 if (Math.Abs(dx) > 0.1 || Math.Abs(dy) > 0.1)
                 {
-                    // Save undo state on first movement
-                    if (!hasMovedOrResized)
+                    if (!hasMovedPolygons)
                     {
                         SaveUndoState();
-                        hasMovedOrResized = true;
+                        hasMovedPolygons = true;
                     }
 
-                    // Convert canvas movement to image space
-                    double scaleX = originalImageDimensions.Width / ActualWidth;
-                    double scaleY = originalImageDimensions.Height / ActualHeight;
-
+                    double scaleX = originalImageDimensions.Width / imageDisplayRect.Width;
+                    double scaleY = originalImageDimensions.Height / imageDisplayRect.Height;
                     double imageDx = dx * scaleX;
                     double imageDy = dy * scaleY;
 
-                    // Move all selected labels
                     if (SelectedLabels.Count > 0)
                     {
                         foreach (var label in SelectedLabels)
                         {
-                            label.Rect = new Rect(
-                                label.Rect.X + imageDx,
-                                label.Rect.Y + imageDy,
-                                label.Rect.Width,
-                                label.Rect.Height
-                            );
+                            label.Translate(imageDx, imageDy);
                         }
                     }
                     else if (SelectedLabel != null)
                     {
-                        SelectedLabel.Rect = new Rect(
-                            SelectedLabel.Rect.X + imageDx,
-                            SelectedLabel.Rect.Y + imageDy,
-                            SelectedLabel.Rect.Width,
-                            SelectedLabel.Rect.Height
-                        );
+                        SelectedLabel.Translate(imageDx, imageDy);
                     }
 
-                    DragStart = cursorPosition;
+                    DragStart = clampedCursor;
                 }
             }
+
+            InvalidateVisual();
         }
 
-        private void DrawingCanvas_MouseUp(object sender, MouseButtonEventArgs e)
+        private Point ClampToBounds(Point point)
         {
-            if (IsDrawing)
+            if (Image == null || imageDisplayRect.Width == 0) return point;
+            
+            double clampedX = Math.Max(imageDisplayRect.Left, Math.Min(imageDisplayRect.Right, point.X));
+            double clampedY = Math.Max(imageDisplayRect.Top, Math.Min(imageDisplayRect.Bottom, point.Y));
+            return new Point(clampedX, clampedY);
+        }
+
+        private async void DrawingCanvas_MouseUp(object sender, MouseButtonEventArgs e)
+        {
+            if (IsWaitingForSam)
             {
-                IsDrawing = false;
-                if (CurrentRect.Width > 1 && CurrentRect.Height > 1)
+                mouseDownOnEmpty = false;
+                IsDrawingBox = false;
+                CurrentRect = new Rect(0, 0, 0, 0);
+                InvalidateVisual();
+                return;
+            }
+
+            if (mouseDownOnEmpty)
+            {
+                var endPoint = e.GetPosition(this);
+                double distance = Math.Sqrt(
+                    Math.Pow(endPoint.X - StartPoint.X, 2) +
+                    Math.Pow(endPoint.Y - StartPoint.Y, 2));
+
+                bool wasDrawingBox = IsDrawingBox && CurrentRect.Width > 1 && CurrentRect.Height > 1;
+                Rect savedRect = CurrentRect;
+                Point savedPoint = StartPoint;
+
+                IsDrawingBox = false;
+                CurrentRect = new Rect(0, 0, 0, 0);
+                mouseDownOnEmpty = false;
+                InvalidateVisual();
+
+                if (wasDrawingBox)
+                {
+                    var imageRect = ScaleRectToImage(savedRect);
+                    await RequestSamMaskFromBoxAsync(imageRect);
+                }
+                
+                return;
+            }
+
+            if (IsDragging && hasMovedPolygons)
+            {
+                OnLabelsChanged();
+            }
+
+            IsDragging = false;
+            hasMovedPolygons = false;
+            IsDrawingBox = false;
+            CurrentRect = new Rect(0, 0, 0, 0);
+            Mouse.Capture(null);
+            InvalidateVisual();
+        }
+
+        private async Task RequestSamMaskFromBoxAsync(Rect imageBox)
+        {
+            if (RequestSamMask == null)
+            {
+                System.Diagnostics.Debug.WriteLine("RequestSamMask event is null!");
+                return;
+            }
+
+            IsWaitingForSam = true;
+            InvalidateVisual();
+
+            try
+            {
+                var centerPoint = new Point(
+                    imageBox.X + imageBox.Width / 2,
+                    imageBox.Y + imageBox.Height / 2);
+
+                var polygonPoints = await RequestSamMask(centerPoint, imageBox);
+                
+                if (polygonPoints == null)
+                {
+                    System.Diagnostics.Debug.WriteLine("SAM returned null - SAM3 may not be running");
+                }
+                else if (polygonPoints.Count < 3)
+                {
+                    System.Diagnostics.Debug.WriteLine($"SAM returned too few points: {polygonPoints.Count}");
+                }
+                else
                 {
                     SaveUndoState();
-
-                    // Convert final canvas coordinates to image coordinates for storage
-                    double scaleX = originalImageDimensions.Width / ActualWidth;
-                    double scaleY = originalImageDimensions.Height / ActualHeight;
-
-                    var imageRect = new Rect(
-                        CurrentRect.X * scaleX,
-                        CurrentRect.Y * scaleY,
-                        CurrentRect.Width * scaleX,
-                        CurrentRect.Height * scaleY
-                    );
-
-                    var newLabel = new LabelData($"Label {Labels.Count + 1}", imageRect, CurrentClassId);
+                    var newLabel = new LabelData($"Label {Labels.Count + 1}", polygonPoints, CurrentClassId);
                     Labels.Add(newLabel);
 
-                    // FIXED: Use proper UI refresh that includes class colors
                     if (Application.Current.MainWindow is MainWindow mainWindow)
                     {
                         mainWindow.RefreshLabelListFromCanvas();
@@ -673,23 +832,22 @@ namespace YoableSeg
 
                     OnLabelsChanged();
                 }
-                CurrentRect = new Rect(0, 0, 0, 0);
             }
-
-            // Only call OnLabelsChanged if we actually moved or resized something
-            if ((IsDragging || IsResizing) && hasMovedOrResized)
+            catch (Exception ex)
             {
-                OnLabelsChanged();
+                System.Diagnostics.Debug.WriteLine($"SAM mask request failed: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"Stack trace: {ex.StackTrace}");
             }
-
-            IsDragging = false;
-            IsResizing = false;
-            hasMovedOrResized = false;
+            finally
+            {
+                IsWaitingForSam = false;
+                InvalidateVisual();
+            }
         }
+
 
         private void DrawingCanvas_MouseDown(object sender, MouseButtonEventArgs e)
         {
-            // Ensure this canvas has keyboard focus
             Focus();
             Keyboard.Focus(this);
 
@@ -697,51 +855,20 @@ namespace YoableSeg
             bool handled = false;
             bool ctrlPressed = Keyboard.IsKeyDown(Key.LeftCtrl) || Keyboard.IsKeyDown(Key.RightCtrl);
 
-            // Reset movement flag
-            hasMovedOrResized = false;
+            hasMovedPolygons = false;
+            mouseDownOnEmpty = false;
 
-            // First check resize handles of selected label if any
-            if (SelectedLabel != null)
-            {
-                resizeHandleType = GetResizeHandle(mousePos, SelectedLabel.Rect);
-                if (resizeHandleType != ResizeHandleType.None)
-                {
-                    IsResizing = true;
-                    DragStart = mousePos;
-                    handled = true;
-                    InvalidateVisual();
-                    return;
-                }
-            }
+            var imageMousePos = ScalePointToImage(mousePos);
 
-            // If not resizing, check for label selection
             for (int i = Labels.Count - 1; i >= 0; i--)
             {
                 var label = Labels[i];
+                if (!label.IsValid()) continue;
 
-                // First check if clicking on resize handles
-                resizeHandleType = GetResizeHandle(mousePos, label.Rect);
-                if (resizeHandleType != ResizeHandleType.None)
-                {
-                    SelectedLabel = label;
-                    if (!ctrlPressed)
-                    {
-                        SelectedLabels.Clear();
-                    }
-                    SelectedLabels.Add(label);
-                    IsResizing = true;
-                    DragStart = mousePos;
-                    handled = true;
-                    break;
-                }
-
-                // Then check if clicking on the label itself
-                Rect scaledRect = ScaleRectToCanvas(label.Rect);
-                if (scaledRect.Contains(mousePos))
+                if (label.ContainsPoint(imageMousePos))
                 {
                     if (ctrlPressed)
                     {
-                        // Toggle selection
                         if (SelectedLabels.Contains(label))
                         {
                             SelectedLabels.Remove(label);
@@ -755,7 +882,6 @@ namespace YoableSeg
                     }
                     else
                     {
-                        // Single selection
                         SelectedLabels.Clear();
                         SelectedLabels.Add(label);
                         SelectedLabel = label;
@@ -768,160 +894,55 @@ namespace YoableSeg
                 }
             }
 
-            // Update ListBox selection to match
-            if (!ctrlPressed && SelectedLabel != null)
+            if (LabelListBox != null)
             {
-                // For single selection, update the ListBox
-                LabelListBox.SelectedItem = SelectedLabel.Name;
-            }
-            else if (ctrlPressed && SelectedLabels.Count == 1 && SelectedLabel != null)
-            {
-                // If only one label is selected after Ctrl+click, update ListBox
-                LabelListBox.SelectedItem = SelectedLabel.Name;
-            }
-            else if (SelectedLabels.Count == 0 || SelectedLabels.Count > 1)
-            {
-                // Clear ListBox selection for no selection or multi-selection
-                LabelListBox.SelectedItem = null;
+                if (!ctrlPressed && SelectedLabel != null)
+                {
+                    LabelListBox.SelectedItem = SelectedLabel.Name;
+                }
+                else if (ctrlPressed && SelectedLabels.Count == 1 && SelectedLabel != null)
+                {
+                    LabelListBox.SelectedItem = SelectedLabel.Name;
+                }
+                else if (SelectedLabels.Count == 0 || SelectedLabels.Count > 1)
+                {
+                    LabelListBox.SelectedItem = null;
+                }
             }
 
             if (!handled)
             {
-                // If we didn't click on any label or resize handle, start drawing
-                IsDrawing = true;
+                mouseDownOnEmpty = true;
                 StartPoint = mousePos;
                 CurrentRect = new Rect(StartPoint, new Size(0, 0));
                 SelectedLabel = null;
                 SelectedLabels.Clear();
             }
 
+            Mouse.Capture(this);
             InvalidateVisual();
-            Keyboard.Focus(this);
         }
 
         private void DrawingCanvas_MouseLeave(object sender, MouseEventArgs e)
         {
-            if (IsDrawing || IsResizing || IsDragging)
-            {
-                DrawingCanvas_MouseUp(sender, null);
-            }
+            InvalidateVisual();
         }
 
-        private ResizeHandleType GetResizeHandle(Point mousePos, Rect rect)
-        {
-            // Convert the rect to canvas coordinates for hit testing
-            Rect scaledRect = ScaleRectToCanvas(rect);
-
-            // Adjust handle size based on zoom factor
-            double s = resizeHandleSize * Math.Sqrt(zoomFactor) / zoomFactor;
-
-            Rect[] handles =
-            {
-                new Rect(scaledRect.Left - s, scaledRect.Top - s, s * 2, s * 2), // Top Left
-                new Rect(scaledRect.Right - s, scaledRect.Top - s, s * 2, s * 2), // Top Right
-                new Rect(scaledRect.Left - s, scaledRect.Bottom - s, s * 2, s * 2), // Bottom Left
-                new Rect(scaledRect.Right - s, scaledRect.Bottom - s, s * 2, s * 2), // Bottom Right
-                new Rect(scaledRect.Left - s, scaledRect.Top + scaledRect.Height / 2 - s, s * 2, s * 2), // Left
-                new Rect(scaledRect.Right - s, scaledRect.Top + scaledRect.Height / 2 - s, s * 2, s * 2), // Right
-                new Rect(scaledRect.Left + scaledRect.Width / 2 - s, scaledRect.Top - s, s * 2, s * 2), // Top
-                new Rect(scaledRect.Left + scaledRect.Width / 2 - s, scaledRect.Bottom - s, s * 2, s * 2) // Bottom
-            };
-
-            ResizeHandleType[] types = {
-                ResizeHandleType.TopLeft, ResizeHandleType.TopRight,
-                ResizeHandleType.BottomLeft, ResizeHandleType.BottomRight,
-                ResizeHandleType.Left, ResizeHandleType.Right,
-                ResizeHandleType.Top, ResizeHandleType.Bottom
-            };
-
-            for (int i = 0; i < handles.Length; i++)
-            {
-                if (handles[i].Contains(mousePos))
-                    return types[i];
-            }
-
-            return ResizeHandleType.None;
-        }
-
-        private void ResizeLabel(LabelData label, ResizeHandleType handleType, Point mousePos)
-        {
-            // Convert canvas position to original image space
-            Point imagePos = new Point(
-                mousePos.X * (originalImageDimensions.Width / ActualWidth),
-                mousePos.Y * (originalImageDimensions.Height / ActualHeight)
-            );
-
-            double x = label.Rect.X;
-            double y = label.Rect.Y;
-            double width = label.Rect.Width;
-            double height = label.Rect.Height;
-
-            switch (handleType)
-            {
-                case ResizeHandleType.TopLeft:
-                    width += x - imagePos.X;
-                    height += y - imagePos.Y;
-                    x = imagePos.X;
-                    y = imagePos.Y;
-                    break;
-
-                case ResizeHandleType.TopRight:
-                    width = imagePos.X - x;
-                    height += y - imagePos.Y;
-                    y = imagePos.Y;
-                    break;
-
-                case ResizeHandleType.BottomLeft:
-                    width += x - imagePos.X;
-                    x = imagePos.X;
-                    height = imagePos.Y - y;
-                    break;
-
-                case ResizeHandleType.BottomRight:
-                    width = imagePos.X - x;
-                    height = imagePos.Y - y;
-                    break;
-
-                case ResizeHandleType.Left:
-                    width += x - imagePos.X;
-                    x = imagePos.X;
-                    break;
-
-                case ResizeHandleType.Right:
-                    width = imagePos.X - x;
-                    break;
-
-                case ResizeHandleType.Top:
-                    height += y - imagePos.Y;
-                    y = imagePos.Y;
-                    break;
-
-                case ResizeHandleType.Bottom:
-                    height = imagePos.Y - y;
-                    break;
-            }
-
-            // Ensure minimum size
-            label.Rect = new Rect(x, y, Math.Max(1, width), Math.Max(1, height));
-        }
 
         protected override void OnMouseDown(MouseButtonEventArgs e)
         {
             Point mousePos = e.GetPosition(this);
+            var imageMousePos = ScalePointToImage(mousePos);
 
             bool clickedOnLabel = false;
             foreach (var label in Labels)
             {
-                // Convert the rect to canvas coordinates for hit testing
-                Rect scaledRect = ScaleRectToCanvas(label.Rect);
-                if (scaledRect.Contains(mousePos))
+                if (!label.IsValid()) continue;
+                if (label.ContainsPoint(imageMousePos))
                 {
                     SelectedLabel = label;
-
-                    // Clear multi-selection and add only this label
                     SelectedLabels.Clear();
                     SelectedLabels.Add(label);
-
                     clickedOnLabel = true;
                     break;
                 }
@@ -931,7 +952,8 @@ namespace YoableSeg
             {
                 SelectedLabel = null;
                 SelectedLabels.Clear();
-                LabelListBox.SelectedItem = null;
+                if (LabelListBox != null)
+                    LabelListBox.SelectedItem = null;
             }
 
             InvalidateVisual();
@@ -940,7 +962,6 @@ namespace YoableSeg
 
         private void DrawingCanvas_PreviewKeyDown(object sender, KeyEventArgs e)
         {
-            // Handle copy/paste/undo/redo shortcuts
             if (Keyboard.IsKeyDown(Key.LeftCtrl) || Keyboard.IsKeyDown(Key.RightCtrl))
             {
                 switch (e.Key)
@@ -966,7 +987,6 @@ namespace YoableSeg
                         return;
 
                     case Key.A:
-                        // Select all
                         SelectedLabels.Clear();
                         foreach (var label in Labels)
                         {
@@ -979,10 +999,9 @@ namespace YoableSeg
                 }
             }
 
-            // Handle movement and deletion for selected labels
             if ((SelectedLabel != null && Labels.Contains(SelectedLabel)) || SelectedLabels.Count > 0)
             {
-                int moveAmount = 1; // Amount of pixels to move
+                int moveAmount = 1;
                 bool needsUndo = false;
 
                 switch (e.Key)
@@ -991,7 +1010,6 @@ namespace YoableSeg
                     case Key.Down:
                     case Key.Left:
                     case Key.Right:
-                        // Only save undo state once per movement action
                         if (!e.IsRepeat)
                         {
                             SaveUndoState();
@@ -1005,56 +1023,44 @@ namespace YoableSeg
                     case Key.Up:
                         if (SelectedLabels.Count > 0)
                         {
-                            foreach (var label in SelectedLabels)
-                            {
-                                label.Rect = new Rect(label.Rect.X, label.Rect.Y - moveAmount, label.Rect.Width, label.Rect.Height);
-                            }
+                            foreach (var label in SelectedLabels) label.Translate(0, -moveAmount);
                         }
                         else if (SelectedLabel != null)
                         {
-                            SelectedLabel.Rect = new Rect(SelectedLabel.Rect.X, SelectedLabel.Rect.Y - moveAmount, SelectedLabel.Rect.Width, SelectedLabel.Rect.Height);
+                            SelectedLabel.Translate(0, -moveAmount);
                         }
                         break;
 
                     case Key.Down:
                         if (SelectedLabels.Count > 0)
                         {
-                            foreach (var label in SelectedLabels)
-                            {
-                                label.Rect = new Rect(label.Rect.X, label.Rect.Y + moveAmount, label.Rect.Width, label.Rect.Height);
-                            }
+                            foreach (var label in SelectedLabels) label.Translate(0, moveAmount);
                         }
                         else if (SelectedLabel != null)
                         {
-                            SelectedLabel.Rect = new Rect(SelectedLabel.Rect.X, SelectedLabel.Rect.Y + moveAmount, SelectedLabel.Rect.Width, SelectedLabel.Rect.Height);
+                            SelectedLabel.Translate(0, moveAmount);
                         }
                         break;
 
                     case Key.Left:
                         if (SelectedLabels.Count > 0)
                         {
-                            foreach (var label in SelectedLabels)
-                            {
-                                label.Rect = new Rect(label.Rect.X - moveAmount, label.Rect.Y, label.Rect.Width, label.Rect.Height);
-                            }
+                            foreach (var label in SelectedLabels) label.Translate(-moveAmount, 0);
                         }
                         else if (SelectedLabel != null)
                         {
-                            SelectedLabel.Rect = new Rect(SelectedLabel.Rect.X - moveAmount, SelectedLabel.Rect.Y, SelectedLabel.Rect.Width, SelectedLabel.Rect.Height);
+                            SelectedLabel.Translate(-moveAmount, 0);
                         }
                         break;
 
                     case Key.Right:
                         if (SelectedLabels.Count > 0)
                         {
-                            foreach (var label in SelectedLabels)
-                            {
-                                label.Rect = new Rect(label.Rect.X + moveAmount, label.Rect.Y, label.Rect.Width, label.Rect.Height);
-                            }
+                            foreach (var label in SelectedLabels) label.Translate(moveAmount, 0);
                         }
                         else if (SelectedLabel != null)
                         {
-                            SelectedLabel.Rect = new Rect(SelectedLabel.Rect.X + moveAmount, SelectedLabel.Rect.Y, SelectedLabel.Rect.Width, SelectedLabel.Rect.Height);
+                            SelectedLabel.Translate(moveAmount, 0);
                         }
                         break;
 
@@ -1062,7 +1068,6 @@ namespace YoableSeg
                         SaveUndoState();
                         if (SelectedLabels.Count > 0)
                         {
-                            // Create a copy of the collection to avoid modification during iteration
                             var labelsToDelete = SelectedLabels.ToList();
                             foreach (var label in labelsToDelete)
                             {
@@ -1076,7 +1081,6 @@ namespace YoableSeg
                         }
                         SelectedLabel = null;
 
-                        // FIXED: Refresh the UI properly
                         if (Application.Current.MainWindow is MainWindow mainWindow)
                         {
                             mainWindow.RefreshLabelListFromCanvas();

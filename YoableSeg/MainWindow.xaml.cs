@@ -1,10 +1,11 @@
-﻿using Microsoft.Win32;
+using Microsoft.Win32;
 using ModernWpf;
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -30,6 +31,12 @@ namespace YoableSeg
         private YoloAI yoloAI;
         public OverlayManager overlayManager;
         private YoutubeDownloader youtubeDownloader;
+
+        // Auto-labeling background task tracking
+        private CancellationTokenSource? autoLabelCancellationTokenSource;
+        private bool isAutoLabelingRunning = false;
+        private int autoLabelProgress = 0;
+        private int autoLabelTotal = 0;
 
         public MainWindow()
         {
@@ -71,7 +78,11 @@ namespace YoableSeg
             overlayManager = new OverlayManager(this);
             youtubeDownloader = new YoutubeDownloader(this, overlayManager);
 
-            // Subscribe to class changes from DrawingCanvas
+            SetupSamIntegration();
+            UpdatePythonServiceStatus();
+            
+            StartSam3InBackground();
+
             drawingCanvas.CurrentClassChanged += DrawingCanvas_CurrentClassChanged;
 
             // Initialize with default class if no project loaded
@@ -617,8 +628,17 @@ namespace YoableSeg
             }
         }
 
+        private bool _isClosing = false;
+
         private async void Window_Closing(object sender, CancelEventArgs e)
         {
+            if (_isClosing)
+                return;
+
+            // Cancel the close event initially - we'll close manually after cleanup
+            e.Cancel = true;
+            _isClosing = true;
+
             // Check for unsaved changes
             if (projectManager != null && projectManager.IsProjectOpen && projectManager.HasUnsavedChanges)
             {
@@ -630,33 +650,40 @@ namespace YoableSeg
 
                 if (result == MessageBoxResult.Cancel)
                 {
-                    e.Cancel = true;
+                    _isClosing = false;
                     return;
                 }
 
                 if (result == MessageBoxResult.Yes)
                 {
-                    // Cancel the close temporarily
-                    e.Cancel = true;
-
-                    // Save synchronously (blocking) since we're closing
                     projectManager.ExportProjectData();
                     bool saved = projectManager.SaveProjectSync();
 
-                    if (saved)
+                    if (!saved)
                     {
-                        // Now actually close
-                        projectManager?.Dispose();
-                        yoloAI?.Dispose();
-                        Application.Current.Shutdown();
+                        _isClosing = false;
+                        return;
                     }
-                    return;
                 }
             }
 
-            // Cleanup
-            projectManager?.Dispose();
-            yoloAI?.Dispose();
+            // Perform cleanup asynchronously off the UI thread
+            await Task.Run(() =>
+            {
+                try
+                {
+                    projectManager?.Dispose();
+                    yoloAI?.Dispose();
+                    PythonServiceManager.Instance?.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Cleanup error: {ex.Message}");
+                }
+            });
+
+            // Now close the application
+            Application.Current.Shutdown();
         }
 
         #endregion
@@ -708,19 +735,41 @@ namespace YoableSeg
             MarkProjectDirty();
         }
 
-        public void ImageListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        public async void ImageListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             if (ImageListBox.SelectedItem is ImageListItem selected &&
                 imageManager.ImagePathMap.TryGetValue(selected.FileName, out ImageManager.ImageInfo imageInfo))
             {
-                // Save existing labels
+                // Save existing labels AND mark previous image as verified if needed
                 if (!string.IsNullOrEmpty(imageManager.CurrentImagePath))
                 {
-                    labelManager.SaveLabels(imageManager.CurrentImagePath, drawingCanvas.Labels);
+                    string currentFileName = Path.GetFileName(imageManager.CurrentImagePath);
+                    labelManager.SaveLabels(currentFileName, drawingCanvas.Labels);
+                    
+                    // Mark the PREVIOUS image as verified when moving away from it
+                    if (labelManager.LabelStorage.ContainsKey(currentFileName))
+                    {
+                        var labels = labelManager.LabelStorage[currentFileName];
+                        if (labels.Any(l => l.Name.StartsWith("AI") || l.Name.StartsWith("Imported")))
+                        {
+                            var currentStatus = imageManager.GetImageStatus(currentFileName);
+                            if (currentStatus == ImageStatus.VerificationNeeded)
+                            {
+                                imageManager.UpdateImageStatusValue(currentFileName, ImageStatus.Verified);
+                                
+                                // Update UI for the previous image
+                                if (uiStateManager.TryGetFromCache(currentFileName, out var previousImageItem))
+                                {
+                                    previousImageItem.Status = ImageStatus.Verified;
+                                }
+                            }
+                        }
+                    }
+                    
                     MarkProjectDirty();
                 }
 
-                imageManager.CurrentImagePath = selected.FileName;
+                imageManager.CurrentImagePath = imageInfo.Path;
 
                 drawingCanvas.LoadImage(imageInfo.Path, imageInfo.OriginalDimensions);
 
@@ -734,20 +783,6 @@ namespace YoableSeg
 
                     // Fix any labels that reference non-existent classes
                     FixOrphanedLabels(drawingCanvas.Labels);
-
-                    // Update status when viewing an image with AI or imported labels
-                    if (labelManager.LabelStorage[selected.FileName].Any(l => l.Name.StartsWith("AI") || l.Name.StartsWith("Imported")))
-                    {
-                        // Only update to Verified if it was previously VerificationNeeded
-                        var currentStatus = imageManager.GetImageStatus(selected.FileName);
-                        if (currentStatus == ImageStatus.VerificationNeeded)
-                        {
-                            imageManager.UpdateImageStatusValue(selected.FileName, ImageStatus.Verified);
-
-                            // Update the status property directly on the existing item
-                            selected.Status = ImageStatus.Verified;
-                        }
-                    }
                 }
                 else
                 {
@@ -1503,22 +1538,22 @@ namespace YoableSeg
                 switch (e.Key)
                 {
                     case Key.Up:
-                        drawingCanvas.SelectedLabel.Rect = new Rect(drawingCanvas.SelectedLabel.Rect.X, drawingCanvas.SelectedLabel.Rect.Y - moveAmount, drawingCanvas.SelectedLabel.Rect.Width, drawingCanvas.SelectedLabel.Rect.Height);
+                        drawingCanvas.SelectedLabel.Translate(0, -moveAmount);
                         e.Handled = true;
                         break;
 
                     case Key.Down:
-                        drawingCanvas.SelectedLabel.Rect = new Rect(drawingCanvas.SelectedLabel.Rect.X, drawingCanvas.SelectedLabel.Rect.Y + moveAmount, drawingCanvas.SelectedLabel.Rect.Width, drawingCanvas.SelectedLabel.Rect.Height);
+                        drawingCanvas.SelectedLabel.Translate(0, moveAmount);
                         e.Handled = true;
                         break;
 
                     case Key.Left:
-                        drawingCanvas.SelectedLabel.Rect = new Rect(drawingCanvas.SelectedLabel.Rect.X - moveAmount, drawingCanvas.SelectedLabel.Rect.Y, drawingCanvas.SelectedLabel.Rect.Width, drawingCanvas.SelectedLabel.Rect.Height);
+                        drawingCanvas.SelectedLabel.Translate(-moveAmount, 0);
                         e.Handled = true;
                         break;
 
                     case Key.Right:
-                        drawingCanvas.SelectedLabel.Rect = new Rect(drawingCanvas.SelectedLabel.Rect.X + moveAmount, drawingCanvas.SelectedLabel.Rect.Y, drawingCanvas.SelectedLabel.Rect.Width, drawingCanvas.SelectedLabel.Rect.Height);
+                        drawingCanvas.SelectedLabel.Translate(moveAmount, 0);
                         e.Handled = true;
                         break;
 
@@ -1671,7 +1706,6 @@ namespace YoableSeg
         protected override void OnClosing(CancelEventArgs e)
         {
             base.OnClosing(e);
-            yoloAI?.Dispose();
         }
 
         #endregion
@@ -1929,6 +1963,321 @@ namespace YoableSeg
             
             // Refresh label list to update UI
             uiStateManager.RefreshLabelList();
+        }
+
+        #endregion
+
+        #region SAM3 Integration
+
+        private void SetupSamIntegration()
+        {
+            var pythonService = PythonServiceManager.Instance;
+            
+            pythonService.OnLogMessage += (msg) =>
+            {
+                Debug.WriteLine(msg);
+            };
+            
+            drawingCanvas.RequestSamMask += async (point, box) =>
+            {
+                if (!pythonService.IsRunning)
+                {
+                    Debug.WriteLine("SAM3: Service not running, ignoring request");
+                    MessageBox.Show(
+                        "SAM3 is not running yet. Please wait for it to start.",
+                        "SAM3 Not Ready",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                    return null;
+                }
+
+                string imagePath = imageManager.CurrentImagePath;
+                if (string.IsNullOrEmpty(imagePath) || !File.Exists(imagePath))
+                {
+                    Debug.WriteLine($"SAM3: No image loaded or image file not found: {imagePath}");
+                    MessageBox.Show(
+                        "No image loaded. Please load an image first.",
+                        "No Image",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information);
+                    return null;
+                }
+
+                try
+                {
+                    if (!box.HasValue)
+                    {
+                        return null;
+                    }
+
+                    var rect = box.Value;
+                    var (success, polygon) = await pythonService.RequestBoxMaskAsync(
+                        imagePath, rect.X, rect.Y, rect.X + rect.Width, rect.Y + rect.Height);
+                    
+                    if (success && polygon != null)
+                    {
+                        var result = polygon.Select(p => new System.Windows.Point(p[0], p[1])).ToList();
+                        return result;
+                    }
+                    return null;
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"SAM mask request error: {ex.Message}");
+                    Debug.WriteLine($"Stack trace: {ex.StackTrace}");
+                    MessageBox.Show(
+                        $"SAM3 error: {ex.Message}",
+                        "SAM3 Error",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Error);
+                    return null;
+                }
+            };
+
+            pythonService.OnStatusChanged += (isRunning) =>
+            {
+                Dispatcher.Invoke(() => UpdatePythonServiceStatus());
+            };
+        }
+
+        private async void StartSam3InBackground()
+        {
+            await Task.Delay(500);
+            
+            var pythonService = PythonServiceManager.Instance;
+            await pythonService.StartServiceAsync();
+        }
+
+        private void UpdatePythonServiceStatus()
+        {
+            var pythonService = PythonServiceManager.Instance;
+            if (pythonService.IsRunning)
+            {
+                PythonStatusIndicator.Fill = new SolidColorBrush(Colors.Green);
+                PythonStatusText.Text = "SAM3 Running";
+                PythonStatusText.Foreground = new SolidColorBrush(Colors.Green);
+                PythonStatusBorder.Background = new SolidColorBrush(Color.FromArgb(0x44, 0x81, 0xC7, 0x84));
+            }
+            else
+            {
+                PythonStatusIndicator.Fill = new SolidColorBrush(Colors.Gray);
+                PythonStatusText.Text = "SAM3 Not Running";
+                PythonStatusText.Foreground = new SolidColorBrush(Colors.Gray);
+                PythonStatusBorder.Background = new SolidColorBrush(Color.FromArgb(0x44, 0x80, 0x80, 0x80));
+            }
+        }
+
+        private async void StartPythonService_Click(object sender, RoutedEventArgs e)
+        {
+            var pythonService = PythonServiceManager.Instance;
+
+            overlayManager.Show("Starting SAM3 Service...", false);
+            
+            bool started = await pythonService.StartServiceAsync();
+            overlayManager.Hide();
+            
+            if (started)
+            {
+                UpdatePythonServiceStatus();
+            }
+            else
+            {
+                MessageBox.Show("Failed to start SAM3 service. Please ensure the Python environment is installed.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+
+        private async void RunAutoLabel_Click(object sender, RoutedEventArgs e)
+        {
+            if (isAutoLabelingRunning)
+            {
+                var result = MessageBox.Show(
+                    "Auto-labeling is currently running in the background.\n\nDo you want to stop it?",
+                    "Auto-Labeling Running",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Question);
+                
+                if (result == MessageBoxResult.Yes)
+                {
+                    autoLabelCancellationTokenSource?.Cancel();
+                    isAutoLabelingRunning = false;
+                    UpdateAutoLabelStatus("Auto-labeling stopped");
+                }
+                return;
+            }
+
+            var pythonService = PythonServiceManager.Instance;
+            
+            if (!pythonService.IsRunning)
+            {
+                MessageBox.Show(
+                    "SAM3 is not running yet. Please wait for it to start.",
+                    "SAM3 Not Ready",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            var dialog = new AutoLabelDialog(projectClasses);
+            dialog.Owner = this;
+            
+            if (dialog.ShowDialog() != true)
+                return;
+
+            var allImages = imageManager.ImagePathMap.Values
+                .OrderBy(img => img.Path)
+                .ToList();
+            
+            var imagesToProcess = allImages
+                .Where(img => 
+                {
+                    var fileName = Path.GetFileName(img.Path);
+                    var labels = labelManager.GetLabels(fileName);
+                    return labels == null || labels.Count == 0;
+                })
+                .ToList();
+
+            if (imagesToProcess.Count == 0)
+            {
+                MessageBox.Show(
+                    "All images already have labels.\n\nNo images to process.",
+                    "Nothing to Label",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            autoLabelCancellationTokenSource = new CancellationTokenSource();
+            isAutoLabelingRunning = true;
+            autoLabelProgress = 0;
+            autoLabelTotal = imagesToProcess.Count;
+
+            var prompts = dialog.Prompts;
+            var promptToClassMapping = dialog.PromptToClassMapping;
+            var textThreshold = dialog.TextThreshold;
+            var boxThreshold = dialog.BoxThreshold;
+            var maxInstances = dialog.MaxInstances;
+
+            UpdateAutoLabelStatus($"Auto-labeling: 0/{imagesToProcess.Count}");
+
+            _ = Task.Run(async () =>
+            {
+                int totalLabels = 0;
+                int processed = 0;
+                var token = autoLabelCancellationTokenSource.Token;
+
+                try
+                {
+                    foreach (var imageInfo in imagesToProcess)
+                    {
+                        if (token.IsCancellationRequested)
+                            break;
+
+                        if (!File.Exists(imageInfo.Path))
+                        {
+                            processed++;
+                            continue;
+                        }
+
+                        try
+                        {
+                            var results = await PythonServiceManager.Instance.RequestAutoLabelAsync(
+                                imageInfo.Path,
+                                prompts,
+                                promptToClassMapping,
+                                textThreshold,
+                                boxThreshold,
+                                maxInstances);
+
+                            if (results != null && results.Count > 0)
+                            {
+                                var polygons = results.Select(r => (
+                                    polygon: r.polygon.Select(p => new System.Windows.Point(p[0], p[1])).ToList(),
+                                    classId: r.classId
+                                )).ToList();
+                                
+                                var fileName = Path.GetFileName(imageInfo.Path);
+                                labelManager.AddAIPolygonLabels(fileName, polygons);
+                                totalLabels += results.Count;
+
+                                await Dispatcher.InvokeAsync(() =>
+                                {
+                                    imageManager.UpdateImageStatusValue(fileName, ImageStatus.VerificationNeeded);
+                                    
+                                    if (uiStateManager.TryGetFromCache(fileName, out var imageItem))
+                                    {
+                                        imageItem.Status = ImageStatus.VerificationNeeded;
+                                    }
+                                    
+                                    if (Path.GetFileName(imageManager.CurrentImagePath) == fileName)
+                                    {
+                                        RefreshLabelListFromCanvas();
+                                    }
+                                    
+                                    uiStateManager.UpdateStatusCounts();
+                                    
+                                    if (projectManager?.IsProjectOpen == true)
+                                    {
+                                        MarkProjectDirty();
+                                    }
+                                });
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.WriteLine($"Auto-label error for {imageInfo.Path}: {ex.Message}");
+                        }
+
+                        processed++;
+                        autoLabelProgress = processed;
+                        
+                        await Dispatcher.InvokeAsync(() =>
+                        {
+                            UpdateAutoLabelStatus($"Auto-labeling: {processed}/{imagesToProcess.Count}");
+                        });
+                    }
+
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        isAutoLabelingRunning = false;
+                        UpdateAutoLabelStatus("");
+                        
+                        RefreshLabelListFromCanvas();
+                        uiStateManager.UpdateStatusCounts();
+
+                        string statusMsg = token.IsCancellationRequested 
+                            ? $"Auto-labeling stopped.\n\n{totalLabels} labels created across {processed} images."
+                            : $"Auto-labeling complete!\n\n{totalLabels} labels created across {processed} images.";
+                        
+                        MessageBox.Show(statusMsg, "Auto-Label Status", MessageBoxButton.OK, MessageBoxImage.Information);
+                    });
+                }
+                catch (Exception ex)
+                {
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        isAutoLabelingRunning = false;
+                        UpdateAutoLabelStatus("");
+                        MessageBox.Show($"Auto-labeling error: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    });
+                }
+            }, autoLabelCancellationTokenSource.Token);
+        }
+
+        private void UpdateAutoLabelStatus(string message)
+        {
+            if (string.IsNullOrEmpty(message))
+            {
+                PythonStatusText.Text = PythonServiceManager.Instance.IsRunning ? "SAM3 Running" : "SAM3 Not Running";
+                PythonStatusIndicator.Fill = PythonServiceManager.Instance.IsRunning 
+                    ? new SolidColorBrush((Color)ColorConverter.ConvertFromString("#4CAF50"))
+                    : new SolidColorBrush((Color)ColorConverter.ConvertFromString("#808080"));
+            }
+            else
+            {
+                PythonStatusText.Text = message;
+                PythonStatusIndicator.Fill = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FF9800"));
+            }
         }
 
         #endregion

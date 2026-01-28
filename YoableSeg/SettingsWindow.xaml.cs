@@ -1,4 +1,4 @@
-﻿using ModernWpf;
+using ModernWpf;
 using System;
 using System.Linq;
 using System.Windows;
@@ -95,6 +95,7 @@ namespace YoableSeg
             // Load AI Settings
             ProcessingDeviceComboBox.SelectedIndex = Properties.Settings.Default.UseGPU ? 1 : 0;
             ConfidenceSlider.Value = Properties.Settings.Default.AIConfidence * 100;
+            MinSam3ConfidenceSlider.Value = Properties.Settings.Default.MinSam3Confidence * 100;
             FormHexAccent.Text = Properties.Settings.Default.FormAccent;
 
             // Load Ensemble Settings
@@ -108,9 +109,10 @@ namespace YoableSeg
             UpdateCheckBox.IsChecked = Properties.Settings.Default.CheckUpdatesOnLaunch;
             AutoSaveCheckBox.IsChecked = Properties.Settings.Default.EnableAutoSave;
 
-            // Label Settings
-            SelectComboBoxItemByTag(LabelColorPicker, Properties.Settings.Default.LabelColor);
+            // Polygon Display Settings
             LabelThicknessSlider.Value = Properties.Settings.Default.LabelThickness;
+            PolygonFillOpacitySlider.Value = Properties.Settings.Default.PolygonFillOpacity;
+            PolygonSimplificationSlider.Value = Properties.Settings.Default.PolygonSimplificationTolerance;
 
             // Crosshair Settings
             SelectComboBoxItemByTag(CrosshairColorPicker, Properties.Settings.Default.CrosshairColor);
@@ -178,6 +180,7 @@ namespace YoableSeg
             // Save AI Settings
             Properties.Settings.Default.UseGPU = ProcessingDeviceComboBox.SelectedIndex == 1;
             Properties.Settings.Default.AIConfidence = (float)(ConfidenceSlider.Value / 100);
+            Properties.Settings.Default.MinSam3Confidence = (float)(MinSam3ConfidenceSlider.Value / 100);
 
             // Save Ensemble Settings
             Properties.Settings.Default.MinimumConsensus = (int)MinConsensusSlider.Value;
@@ -192,9 +195,10 @@ namespace YoableSeg
             Properties.Settings.Default.FormAccent = FormHexAccent.Text;
             ThemeManager.Current.AccentColor = (Color)ColorConverter.ConvertFromString(FormHexAccent.Text);
 
-            // Label Settings
-            Properties.Settings.Default.LabelColor = ((ComboBoxItem)LabelColorPicker.SelectedItem).Tag.ToString();
+            // Polygon Display Settings
             Properties.Settings.Default.LabelThickness = LabelThicknessSlider.Value;
+            Properties.Settings.Default.PolygonFillOpacity = PolygonFillOpacitySlider.Value;
+            Properties.Settings.Default.PolygonSimplificationTolerance = PolygonSimplificationSlider.Value;
 
             // Crosshair settings
             Properties.Settings.Default.EnableCrosshair = CrosshairEnabledCheckbox.IsChecked ?? false;

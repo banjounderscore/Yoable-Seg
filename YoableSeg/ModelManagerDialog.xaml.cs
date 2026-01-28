@@ -1,4 +1,4 @@
-﻿using Microsoft.Win32;
+using Microsoft.Win32;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
@@ -80,6 +80,7 @@ namespace YoableSeg
                 {
                     YoloFormat.YoloV5 => "YOLOv5",
                     YoloFormat.YoloV8 => "YOLOv8",
+                    YoloFormat.YoloV8Seg => "YOLOv26-seg",
                     _ => "Unknown"
                 };
 
