@@ -9,12 +9,16 @@ class AutoLabelRequest(BaseModel):
     max_instances: int = 50
     simplification: float = 0.0
     min_sam3_confidence: float = 0.6
+    existing_polygons: Optional[List[List[List[float]]]] = None
+    nms_iou_threshold: float = 0.5
 
 class BoxToMaskRequest(BaseModel):
     image_path: str
     box: List[float]  # [x1, y1, x2, y2] in pixel coordinates
     simplification: float = 0.0
     min_sam3_confidence: float = 0.6
+    existing_polygons: Optional[List[List[List[float]]]] = None
+    nms_iou_threshold: float = 0.5
 
 class RLEMask(BaseModel):
     counts: str

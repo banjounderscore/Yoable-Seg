@@ -38,6 +38,9 @@ namespace YoableSeg
         private int autoLabelProgress = 0;
         private int autoLabelTotal = 0;
 
+        // For tracking label state before changes for undo
+        private List<LabelData> labelStateBeforeChange = null;
+
         public MainWindow()
         {
             InitializeComponent();
@@ -46,10 +49,29 @@ namespace YoableSeg
             drawingCanvas = (DrawingCanvas)FindName("drawingCanvas");
             drawingCanvas.LabelListBox = LabelListBox;
 
-            // Subscribe to the LabelsChanged event to detect any label modifications
+            drawingCanvas.BeforeLabelChange += (previousLabels) =>
+            {
+                labelStateBeforeChange = previousLabels;
+            };
+
             drawingCanvas.LabelsChanged += (sender, e) =>
             {
-                // Refresh the label list and status immediately
+                if (labelStateBeforeChange != null && !string.IsNullOrEmpty(imageManager.CurrentImagePath))
+                {
+                    string currentFileName = Path.GetFileName(imageManager.CurrentImagePath);
+                    var newLabels = drawingCanvas.Labels.Select(l => new LabelData(l)).ToList();
+
+                    var labelAction = new LabelChangeAction(
+                        currentFileName,
+                        labelStateBeforeChange,
+                        newLabels,
+                        labelManager,
+                        OnLabelUndoRedoCallback);
+
+                    UndoManager.Instance.RecordAction(labelAction);
+                    labelStateBeforeChange = null;
+                }
+
                 RefreshLabelListFromCanvas();
                 
                 if (projectManager != null && projectManager.IsProjectOpen)
@@ -97,6 +119,43 @@ namespace YoableSeg
             }
         }
         #region Helper Methods
+
+        private List<List<double[]>> GetExistingPolygonsForCurrentImage()
+        {
+            var existingPolygons = new List<List<double[]>>();
+            
+            foreach (var label in drawingCanvas.Labels)
+            {
+                if (label.Points != null && label.Points.Count >= 3)
+                {
+                    var polygon = label.Points.Select(p => new double[] { p.X, p.Y }).ToList();
+                    existingPolygons.Add(polygon);
+                }
+            }
+
+            return existingPolygons.Count > 0 ? existingPolygons : null;
+        }
+
+        private List<List<double[]>> GetExistingPolygonsForImage(string fileName)
+        {
+            if (string.IsNullOrEmpty(fileName))
+                return null;
+
+            if (!labelManager.LabelStorage.TryGetValue(fileName, out var labels) || labels.Count == 0)
+                return null;
+
+            var existingPolygons = new List<List<double[]>>();
+            foreach (var label in labels)
+            {
+                if (label.Points != null && label.Points.Count >= 3)
+                {
+                    var polygon = label.Points.Select(p => new double[] { p.X, p.Y }).ToList();
+                    existingPolygons.Add(polygon);
+                }
+            }
+
+            return existingPolygons.Count > 0 ? existingPolygons : null;
+        }
 
         /// <summary>
         /// Prompts user to save changes if there are unsaved changes.
@@ -165,6 +224,152 @@ namespace YoableSeg
                     label.ClassId = defaultClass.ClassId;
                 }
             }
+        }
+
+        private void DeleteCurrentImage()
+        {
+            if (ImageListBox.SelectedItem is not ImageListItem selectedItem)
+                return;
+
+            string fileName = selectedItem.FileName;
+
+            if (!imageManager.ImagePathMap.TryGetValue(fileName, out var imageInfo))
+                return;
+
+            var existingLabels = labelManager.LabelStorage.TryGetValue(fileName, out var labels)
+                ? labels.ToList()
+                : new List<LabelData>();
+
+            var status = imageManager.GetImageStatus(fileName);
+
+            var undoAction = new ImageDeleteAction(
+                fileName,
+                imageInfo.Path,
+                imageInfo.OriginalDimensions,
+                status,
+                existingLabels,
+                imageManager,
+                labelManager,
+                OnImageUndoRedoCallback);
+
+            UndoManager.Instance.RecordAction(undoAction);
+
+            int currentIndex = ImageListBox.SelectedIndex;
+
+            imageManager.RemoveImage(fileName);
+            labelManager.LabelStorage.TryRemove(fileName, out _);
+            uiStateManager.RemoveFromCache(fileName);
+
+            ImageListBox.Items.Remove(selectedItem);
+
+            if (ImageListBox.Items.Count > 0)
+            {
+                int newIndex = currentIndex >= ImageListBox.Items.Count
+                    ? ImageListBox.Items.Count - 1
+                    : currentIndex;
+                ImageListBox.SelectedIndex = newIndex;
+            }
+            else
+            {
+                drawingCanvas.Image = null;
+                drawingCanvas.Labels.Clear();
+                LabelListBox.Items.Clear();
+                drawingCanvas.InvalidateVisual();
+            }
+
+            uiStateManager.UpdateStatusCounts();
+            uiStateManager.RefreshAllImagesList();
+            MarkProjectDirty();
+        }
+
+        private void OnImageUndoRedoCallback(string fileName, bool isRestore)
+        {
+            if (isRestore)
+            {
+                var status = imageManager.GetImageStatus(fileName);
+                var newItem = new ImageListItem(fileName, status);
+                
+                int insertIndex = 0;
+                for (int i = 0; i < ImageListBox.Items.Count; i++)
+                {
+                    if (ImageListBox.Items[i] is ImageListItem existingItem)
+                    {
+                        if (string.Compare(fileName, existingItem.FileName, StringComparison.OrdinalIgnoreCase) < 0)
+                        {
+                            insertIndex = i;
+                            break;
+                        }
+                        insertIndex = i + 1;
+                    }
+                }
+                
+                ImageListBox.Items.Insert(insertIndex, newItem);
+                uiStateManager.AddToCache(newItem);
+
+                ImageListBox.SelectedItem = newItem;
+                ImageListBox.ScrollIntoView(newItem);
+            }
+            else
+            {
+                if (uiStateManager.TryGetFromCache(fileName, out var imageItem))
+                {
+                    uiStateManager.RemoveFromCache(fileName);
+
+                    int currentIndex = ImageListBox.Items.IndexOf(imageItem);
+                    ImageListBox.Items.Remove(imageItem);
+
+                    if (ImageListBox.Items.Count > 0)
+                    {
+                        int newIndex = currentIndex >= ImageListBox.Items.Count
+                            ? ImageListBox.Items.Count - 1
+                            : currentIndex;
+                        ImageListBox.SelectedIndex = newIndex;
+                    }
+                    else
+                    {
+                        drawingCanvas.Image = null;
+                        drawingCanvas.Labels.Clear();
+                        LabelListBox.Items.Clear();
+                        drawingCanvas.InvalidateVisual();
+                    }
+                }
+            }
+
+            uiStateManager.UpdateStatusCounts();
+            uiStateManager.RefreshAllImagesList();
+            MarkProjectDirty();
+        }
+
+        private void OnLabelUndoRedoCallback()
+        {
+            string currentFileName = Path.GetFileName(imageManager.CurrentImagePath);
+            
+            if (labelManager.LabelStorage.TryGetValue(currentFileName, out var labels))
+            {
+                drawingCanvas.Labels = new List<LabelData>(labels);
+            }
+            else
+            {
+                drawingCanvas.Labels.Clear();
+            }
+
+            drawingCanvas.SelectedLabel = null;
+            drawingCanvas.SelectedLabels.Clear();
+            drawingCanvas.InvalidateVisual();
+
+            uiStateManager.RefreshLabelList();
+            uiStateManager.UpdateStatusCounts();
+            MarkProjectDirty();
+        }
+
+        private void PerformGlobalUndo()
+        {
+            UndoManager.Instance.Undo();
+        }
+
+        private void PerformGlobalRedo()
+        {
+            UndoManager.Instance.Redo();
         }
 
         #endregion
@@ -1459,6 +1664,23 @@ namespace YoableSeg
                 return;
             }
 
+            // Handle global Ctrl+Z and Ctrl+Y for undo/redo - always use global UndoManager
+            if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+            {
+                if (e.Key == Key.Z)
+                {
+                    PerformGlobalUndo();
+                    e.Handled = true;
+                    return;
+                }
+                else if (e.Key == Key.Y)
+                {
+                    PerformGlobalRedo();
+                    e.Handled = true;
+                    return;
+                }
+            }
+
             OnPreviewKeyDown(e);
         }
 
@@ -1466,25 +1688,31 @@ namespace YoableSeg
         {
             base.OnPreviewKeyDown(e);
 
-            // If DrawingCanvas has focus and Ctrl is pressed, let it handle the shortcuts
+            // If DrawingCanvas has focus and Ctrl is pressed, let it handle copy/paste/select all
             if (drawingCanvas.IsFocused && (Keyboard.IsKeyDown(Key.LeftCtrl) || Keyboard.IsKeyDown(Key.RightCtrl)))
             {
                 switch (e.Key)
                 {
                     case Key.C:
                     case Key.V:
-                    case Key.Z:
-                    case Key.Y:
                     case Key.A:
-                        // Let DrawingCanvas handle these
                         return;
                 }
             }
 
-            // Also let DrawingCanvas handle Delete key when it has focus and labels are selected
+            // Let DrawingCanvas handle Delete key when it has focus and labels are selected
             if (drawingCanvas.IsFocused && e.Key == Key.Delete &&
                 (drawingCanvas.SelectedLabel != null || drawingCanvas.SelectedLabels.Count > 0))
             {
+                return;
+            }
+
+            // Handle Delete key when no label is selected - delete the current image
+            if (e.Key == Key.Delete && ImageListBox.SelectedItem != null &&
+                drawingCanvas.SelectedLabel == null && drawingCanvas.SelectedLabels.Count == 0)
+            {
+                DeleteCurrentImage();
+                e.Handled = true;
                 return;
             }
 
@@ -1493,27 +1721,24 @@ namespace YoableSeg
             // Check for both top number keys (D1-D9) and numpad keys (NumPad1-NumPad9)
             if (e.Key >= Key.D1 && e.Key <= Key.D9)
             {
-                index = (int)e.Key - (int)Key.D1; // Convert key to index (0-based)
+                index = (int)e.Key - (int)Key.D1;
             }
             else if (e.Key >= Key.NumPad1 && e.Key <= Key.NumPad9)
             {
-                index = (int)e.Key - (int)Key.NumPad1; // Convert numpad key to index (0-based)
+                index = (int)e.Key - (int)Key.NumPad1;
             }
 
             if (index >= 0 && index < LabelListBox.Items.Count)
             {
                 LabelListBox.SelectedIndex = index;
 
-                // Clear multi-selection when using number keys
                 drawingCanvas.SelectedLabels.Clear();
 
-                // Ensure the selected label is updated in DrawingCanvas
                 string selectedLabelName = LabelListBox.SelectedItem as string;
                 if (!string.IsNullOrEmpty(selectedLabelName))
                 {
                     drawingCanvas.SelectedLabel = drawingCanvas.Labels.FirstOrDefault(label => label.Name == selectedLabelName);
 
-                    // Add the single selected label to SelectedLabels for consistency
                     if (drawingCanvas.SelectedLabel != null)
                     {
                         drawingCanvas.SelectedLabels.Add(drawingCanvas.SelectedLabel);
@@ -1522,72 +1747,13 @@ namespace YoableSeg
                     drawingCanvas.InvalidateVisual();
                 }
 
-                // Force focus back to the window to keep key events working
                 this.Focus();
                 Keyboard.Focus(this);
 
                 e.Handled = true;
-                return; // Prevent further processing
+                return;
             }
 
-            // Handle label movement and deletion - but only if DrawingCanvas doesn't have focus
-            if (!drawingCanvas.IsFocused && drawingCanvas.SelectedLabel != null)
-            {
-                int moveAmount = 1;
-
-                switch (e.Key)
-                {
-                    case Key.Up:
-                        drawingCanvas.SelectedLabel.Translate(0, -moveAmount);
-                        e.Handled = true;
-                        break;
-
-                    case Key.Down:
-                        drawingCanvas.SelectedLabel.Translate(0, moveAmount);
-                        e.Handled = true;
-                        break;
-
-                    case Key.Left:
-                        drawingCanvas.SelectedLabel.Translate(-moveAmount, 0);
-                        e.Handled = true;
-                        break;
-
-                    case Key.Right:
-                        drawingCanvas.SelectedLabel.Translate(moveAmount, 0);
-                        e.Handled = true;
-                        break;
-
-                    case Key.Delete:
-                        // Handle multi-selection deletion
-                        if (drawingCanvas.SelectedLabels.Count > 0)
-                        {
-                            var labelsToDelete = drawingCanvas.SelectedLabels.ToList();
-                            foreach (var label in labelsToDelete)
-                            {
-                                drawingCanvas.Labels.Remove(label);
-                                LabelListBox.Items.Remove(label.Name);
-                            }
-                            drawingCanvas.SelectedLabels.Clear();
-                            drawingCanvas.SelectedLabel = null;
-                        }
-                        else if (drawingCanvas.SelectedLabel != null)
-                        {
-                            drawingCanvas.Labels.Remove(drawingCanvas.SelectedLabel);
-                            LabelListBox.Items.Remove(drawingCanvas.SelectedLabel.Name);
-                            drawingCanvas.SelectedLabel = null;
-                        }
-                        OnLabelsChanged();
-                        drawingCanvas.InvalidateVisual();
-                        e.Handled = true;
-                        break;
-                }
-
-                if (e.Handled)
-                {
-                    drawingCanvas.InvalidateVisual();
-                    MarkProjectDirty();
-                }
-            }
         }
 
 
@@ -1658,6 +1824,7 @@ namespace YoableSeg
 
         private void FilterAll_Click(object sender, RoutedEventArgs e)
         {
+            if (uiStateManager == null) return;
             uiStateManager.UpdateFilterButtonStyles(
                 FilterAllButton, FilterReviewButton, FilterNoLabelButton, FilterVerifiedButton,
                 activeButton: FilterAllButton);
@@ -1666,6 +1833,7 @@ namespace YoableSeg
 
         private void FilterReview_Click(object sender, RoutedEventArgs e)
         {
+            if (uiStateManager == null) return;
             uiStateManager.UpdateFilterButtonStyles(
                 FilterAllButton, FilterReviewButton, FilterNoLabelButton, FilterVerifiedButton,
                 activeButton: FilterReviewButton);
@@ -1674,6 +1842,7 @@ namespace YoableSeg
 
         private void FilterNoLabel_Click(object sender, RoutedEventArgs e)
         {
+            if (uiStateManager == null) return;
             uiStateManager.UpdateFilterButtonStyles(
                 FilterAllButton, FilterReviewButton, FilterNoLabelButton, FilterVerifiedButton,
                 activeButton: FilterNoLabelButton);
@@ -1682,6 +1851,7 @@ namespace YoableSeg
 
         private void FilterVerified_Click(object sender, RoutedEventArgs e)
         {
+            if (uiStateManager == null) return;
             uiStateManager.UpdateFilterButtonStyles(
                 FilterAllButton, FilterReviewButton, FilterNoLabelButton, FilterVerifiedButton,
                 activeButton: FilterVerifiedButton);
@@ -2010,9 +2180,13 @@ namespace YoableSeg
                         return null;
                     }
 
+                    var existingPolygons = GetExistingPolygonsForCurrentImage();
+
                     var rect = box.Value;
                     var (success, polygon) = await pythonService.RequestBoxMaskAsync(
-                        imagePath, rect.X, rect.Y, rect.X + rect.Width, rect.Y + rect.Height);
+                        imagePath, rect.X, rect.Y, rect.X + rect.Width, rect.Y + rect.Height,
+                        existingPolygons: existingPolygons,
+                        nmsIouThreshold: Properties.Settings.Default.NmsIouThreshold);
                     
                     if (success && polygon != null)
                     {
@@ -2181,13 +2355,17 @@ namespace YoableSeg
 
                         try
                         {
+                            var existingPolygons = GetExistingPolygonsForImage(Path.GetFileName(imageInfo.Path));
+
                             var results = await PythonServiceManager.Instance.RequestAutoLabelAsync(
                                 imageInfo.Path,
                                 prompts,
                                 promptToClassMapping,
                                 textThreshold,
                                 boxThreshold,
-                                maxInstances);
+                                maxInstances,
+                                existingPolygons: existingPolygons,
+                                nmsIouThreshold: Properties.Settings.Default.NmsIouThreshold);
 
                             if (results != null && results.Count > 0)
                             {

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Windows;
@@ -26,6 +26,24 @@ namespace YoableSeg.Managers
             imageListItemCache[fileName] = item;
         }
 
+        public void AddToCache(ImageListItem item)
+        {
+            if (item != null)
+            {
+                imageListItemCache[item.FileName] = item;
+                if (!allImages.Contains(item))
+                {
+                    allImages.Add(item);
+                }
+            }
+        }
+
+        public void RemoveFromCache(string fileName)
+        {
+            imageListItemCache.Remove(fileName);
+            allImages.RemoveAll(i => i.FileName == fileName);
+        }
+
         public bool TryGetFromCache(string fileName, out ImageListItem item)
         {
             return imageListItemCache.TryGetValue(fileName, out item);
@@ -39,24 +57,22 @@ namespace YoableSeg.Managers
         public void BuildCache(ItemCollection items)
         {
             imageListItemCache.Clear();
+            allImages.Clear();
             foreach (var item in items)
             {
                 if (item is ImageListItem imageItem)
                 {
                     imageListItemCache[imageItem.FileName] = imageItem;
+                    allImages.Add(imageItem);
                 }
             }
         }
 
-        // Direct port of UpdateStatusCounts
         public void UpdateStatusCounts()
         {
-            var needsReview = mainWindow.ImageListBox.Items.Cast<ImageListItem>()
-                .Count(x => x.Status == ImageStatus.VerificationNeeded);
-            var unverified = mainWindow.ImageListBox.Items.Cast<ImageListItem>()
-                .Count(x => x.Status == ImageStatus.NoLabel);
-            var verified = mainWindow.ImageListBox.Items.Cast<ImageListItem>()
-                .Count(x => x.Status == ImageStatus.Verified);
+            var needsReview = allImages.Count(x => x.Status == ImageStatus.VerificationNeeded);
+            var unverified = allImages.Count(x => x.Status == ImageStatus.NoLabel);
+            var verified = allImages.Count(x => x.Status == ImageStatus.Verified);
 
             // Update the text blocks with counts
             mainWindow.NeedsReviewCount.Text = needsReview.ToString();
@@ -144,16 +160,13 @@ namespace YoableSeg.Managers
             cachedProjectClasses = null;
         }
 
-        // Helper for sorting - direct port
         public void SortImagesByName()
         {
             var items = mainWindow.ImageListBox.Items.Cast<ImageListItem>().ToList();
             var selectedItem = mainWindow.ImageListBox.SelectedItem as ImageListItem;
 
-            // Sort by filename
-            var sorted = items.OrderBy(x => x.FileName).ToList();
+            var sorted = items.OrderBy(x => x.FileName, StringComparer.OrdinalIgnoreCase).ToList();
 
-            // Update ListBox while preserving selection
             mainWindow.ImageListBox.SelectionChanged -= mainWindow.ImageListBox_SelectionChanged;
             mainWindow.ImageListBox.Items.Clear();
             foreach (var item in sorted)
@@ -161,7 +174,6 @@ namespace YoableSeg.Managers
                 mainWindow.ImageListBox.Items.Add(item);
             }
 
-            // Restore selection
             if (selectedItem != null)
             {
                 for (int i = 0; i < mainWindow.ImageListBox.Items.Count; i++)
@@ -221,69 +233,59 @@ namespace YoableSeg.Managers
 
         public void FilterImagesByStatus(ImageStatus? status)
         {
-            // Store all images if not already stored
-            if (allImages == null || allImages.Count == 0)
-            {
-                allImages = new List<ImageListItem>();
-                foreach (ImageListItem item in mainWindow.ImageListBox.Items)
-                {
-                    allImages.Add(item);
-                }
-            }
-
             var selectedItem = mainWindow.ImageListBox.SelectedItem as ImageListItem;
 
             mainWindow.ImageListBox.SelectionChanged -= mainWindow.ImageListBox_SelectionChanged;
             mainWindow.ImageListBox.Items.Clear();
 
+            IEnumerable<ImageListItem> itemsToShow;
+            
             if (status == null)
             {
-                // Show all images
-                foreach (var item in allImages)
-                {
-                    mainWindow.ImageListBox.Items.Add(item);
-                }
+                itemsToShow = allImages;
             }
             else
             {
-                // Filter by status
-                foreach (var item in allImages.Where(i => i.Status == status.Value))
-                {
-                    mainWindow.ImageListBox.Items.Add(item);
-                }
+                itemsToShow = allImages.Where(i => i.Status == status.Value);
             }
 
-            // Restore selection if possible
-            if (selectedItem != null)
+            foreach (var item in itemsToShow.OrderBy(i => i.FileName, StringComparer.OrdinalIgnoreCase))
             {
-                for (int i = 0; i < mainWindow.ImageListBox.Items.Count; i++)
-                {
-                    if (mainWindow.ImageListBox.Items[i] is ImageListItem item &&
-                        item.FileName == selectedItem.FileName)
-                    {
-                        mainWindow.ImageListBox.SelectedIndex = i;
-                        mainWindow.ImageListBox.ScrollIntoView(mainWindow.ImageListBox.SelectedItem);
-                        break;
-                    }
-                }
-            }
-            else if (mainWindow.ImageListBox.Items.Count > 0)
-            {
-                mainWindow.ImageListBox.SelectedIndex = 0;
+                mainWindow.ImageListBox.Items.Add(item);
             }
 
             mainWindow.ImageListBox.SelectionChanged += mainWindow.ImageListBox_SelectionChanged;
+
+            if (mainWindow.ImageListBox.Items.Count > 0)
+            {
+                bool selectionRestored = false;
+                if (selectedItem != null)
+                {
+                    for (int i = 0; i < mainWindow.ImageListBox.Items.Count; i++)
+                    {
+                        if (mainWindow.ImageListBox.Items[i] is ImageListItem item &&
+                            item.FileName == selectedItem.FileName)
+                        {
+                            mainWindow.ImageListBox.SelectedIndex = i;
+                            mainWindow.ImageListBox.ScrollIntoView(mainWindow.ImageListBox.SelectedItem);
+                            selectionRestored = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if (!selectionRestored)
+                {
+                    mainWindow.ImageListBox.SelectedIndex = 0;
+                }
+            }
+
             UpdateStatusCounts();
         }
 
         public void RefreshAllImagesList()
         {
-            // Refresh the complete list of images (call this when images are added/removed)
-            allImages = new List<ImageListItem>();
-            foreach (ImageListItem item in mainWindow.ImageListBox.Items)
-            {
-                allImages.Add(item);
-            }
+            allImages = imageListItemCache.Values.ToList();
         }
 
         public void UpdateFilterButtonStyles(

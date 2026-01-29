@@ -269,3 +269,66 @@ def nms_boxes(boxes: List[List[float]], scores: List[float], iou_threshold: floa
         order = order[inds + 1]
     
     return keep
+
+
+def polygon_to_mask(polygon: List[List[float]], height: int, width: int) -> np.ndarray:
+    """Convert polygon to binary mask."""
+    mask = np.zeros((height, width), dtype=np.uint8)
+    if not polygon or len(polygon) < 3:
+        return mask
+    
+    pts = np.array(polygon, dtype=np.int32).reshape((-1, 1, 2))
+    cv2.fillPoly(mask, [pts], 1)
+    return mask
+
+
+def polygon_iou(poly1: List[List[float]], poly2: List[List[float]], height: int, width: int) -> float:
+    """Calculate IoU between two polygons using mask-based approach."""
+    if not poly1 or not poly2 or len(poly1) < 3 or len(poly2) < 3:
+        return 0.0
+    
+    mask1 = polygon_to_mask(poly1, height, width)
+    mask2 = polygon_to_mask(poly2, height, width)
+    
+    intersection = np.logical_and(mask1, mask2).sum()
+    union = np.logical_or(mask1, mask2).sum()
+    
+    if union == 0:
+        return 0.0
+    
+    return float(intersection) / float(union)
+
+
+def filter_duplicate_polygons(
+    new_polygons: List[List[List[float]]],
+    existing_polygons: List[List[List[float]]],
+    height: int,
+    width: int,
+    iou_threshold: float = 0.5
+) -> List[int]:
+    """
+    Filter out new polygons that overlap significantly with existing ones.
+    
+    Returns indices of new_polygons that should be kept (don't overlap with existing).
+    """
+    if not new_polygons:
+        return []
+    
+    if not existing_polygons:
+        return list(range(len(new_polygons)))
+    
+    keep_indices = []
+    
+    for i, new_poly in enumerate(new_polygons):
+        is_duplicate = False
+        
+        for existing_poly in existing_polygons:
+            iou = polygon_iou(new_poly, existing_poly, height, width)
+            if iou >= iou_threshold:
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
+            keep_indices.append(i)
+    
+    return keep_indices

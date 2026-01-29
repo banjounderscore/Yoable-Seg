@@ -47,7 +47,7 @@ from models import (
 from utils import (
     mask_to_polygon, remove_small_regions,
     fill_holes, fill_holes_advanced, resolve_overlaps, nms_boxes,
-    simplify_mask_morphologically
+    simplify_mask_morphologically, filter_duplicate_polygons, polygon_iou
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -419,6 +419,9 @@ async def autolabel(request: AutoLabelRequest):
         final_masks = resolve_overlaps(processed_masks, valid_scores)
         
         instances = []
+        new_polygons = []
+        instance_data = []
+        
         for i in range(len(final_masks)):
             mask = final_masks[i]
             if mask.sum() < 100:
@@ -428,11 +431,30 @@ async def autolabel(request: AutoLabelRequest):
             if len(polygon) < 3:
                 continue
             
+            new_polygons.append(polygon)
+            instance_data.append({
+                'box': valid_boxes[i],
+                'score': valid_scores[i],
+                'phrase': valid_labels[i],
+                'polygon': polygon
+            })
+        
+        if request.existing_polygons and len(request.existing_polygons) > 0:
+            keep_indices = filter_duplicate_polygons(
+                new_polygons,
+                request.existing_polygons,
+                height,
+                width,
+                request.nms_iou_threshold
+            )
+            instance_data = [instance_data[i] for i in keep_indices]
+        
+        for data in instance_data:
             instances.append(Instance(
-                box=valid_boxes[i],
-                score=valid_scores[i],
-                phrase=valid_labels[i],
-                polygon=polygon,
+                box=data['box'],
+                score=data['score'],
+                phrase=data['phrase'],
+                polygon=data['polygon'],
                 rle=None
             ))
         
@@ -472,6 +494,15 @@ async def box_to_mask(request: BoxToMaskRequest):
         
         if len(polygon) < 3:
             raise HTTPException(status_code=404, detail="No valid object found in box")
+        
+        if request.existing_polygons and len(request.existing_polygons) > 0:
+            for existing_poly in request.existing_polygons:
+                iou = polygon_iou(polygon, existing_poly, height, width)
+                if iou >= request.nms_iou_threshold:
+                    raise HTTPException(
+                        status_code=409, 
+                        detail=f"Label already exists (IoU: {iou:.2f} >= threshold: {request.nms_iou_threshold:.2f})"
+                    )
         
         return MaskResponse(
             width=width,

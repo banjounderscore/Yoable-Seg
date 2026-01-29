@@ -154,7 +154,15 @@ namespace YoableSeg.Managers
             }
         }
 
-        public async Task<(bool success, double[][] polygon)> RequestBoxMaskAsync(string imagePath, double x1, double y1, double x2, double y2, double simplification = -1)
+        public async Task<(bool success, double[][] polygon)> RequestBoxMaskAsync(
+            string imagePath, 
+            double x1, 
+            double y1, 
+            double x2, 
+            double y2, 
+            double simplification = -1,
+            List<List<double[]>> existingPolygons = null,
+            double nmsIouThreshold = 0.5)
         {
             try
             {
@@ -166,7 +174,9 @@ namespace YoableSeg.Managers
                     image_path = imagePath,
                     box = new[] { x1, y1, x2, y2 },
                     simplification = simplification,
-                    min_sam3_confidence = Properties.Settings.Default.MinSam3Confidence
+                    min_sam3_confidence = Properties.Settings.Default.MinSam3Confidence,
+                    existing_polygons = existingPolygons,
+                    nms_iou_threshold = nmsIouThreshold
                 };
 
                 var json = JsonSerializer.Serialize(request);
@@ -195,7 +205,9 @@ namespace YoableSeg.Managers
             float textThreshold,
             float boxThreshold,
             int maxInstances,
-            double simplification = -1)
+            double simplification = -1,
+            List<List<double[]>> existingPolygons = null,
+            double nmsIouThreshold = 0.5)
         {
             try
             {
@@ -210,7 +222,9 @@ namespace YoableSeg.Managers
                     box_threshold = boxThreshold,
                     max_instances = maxInstances,
                     simplification = simplification,
-                    min_sam3_confidence = Properties.Settings.Default.MinSam3Confidence
+                    min_sam3_confidence = Properties.Settings.Default.MinSam3Confidence,
+                    existing_polygons = existingPolygons,
+                    nms_iou_threshold = nmsIouThreshold
                 };
 
                 var json = JsonSerializer.Serialize(request);

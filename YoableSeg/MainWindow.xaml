@@ -292,40 +292,14 @@
                                 <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
 
-                            <StackPanel Grid.Column="0" 
-                                        Orientation="Horizontal" 
-                                        VerticalAlignment="Center"
-                                        Margin="0,0,8,0">
-                                <TextBlock FontFamily="Segoe MDL2 Assets" 
-                                           Text="&#xE8CB;" 
-                                           FontSize="12"
-                                           Foreground="#FFFF9800"
-                                           VerticalAlignment="Center"
-                                           Margin="0,0,6,0"/>
-                                <TextBlock Text="Sort" 
-                                           FontSize="11" 
-                                           FontWeight="SemiBold"
-                                           VerticalAlignment="Center"
-                                           Opacity="0.8"/>
-                            </StackPanel>
-
                             <ComboBox Grid.Column="1"
                                       x:Name="SortComboBox" 
                                       SelectedIndex="0"
                                       SelectionChanged="SortComboBox_SelectionChanged"
-                                      FontSize="11"
-                                      HorizontalAlignment="Stretch">
+                                      Visibility="Collapsed">
                                 <ComboBoxItem Content="By Name"/>
-                                <ComboBoxItem Content="By Status"/>
                             </ComboBox>
                         </Grid>
-
-                        <!-- Separator -->
-                        <Rectangle Grid.Row="1" 
-                                   Height="1" 
-                                   Fill="{DynamicResource SystemControlForegroundBaseLowBrush}"
-                                   Opacity="0.2"
-                                   Margin="0,4"/>
 
                         <!-- Filter Controls -->
                         <Grid Grid.Row="2">

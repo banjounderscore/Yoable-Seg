@@ -125,18 +125,15 @@ namespace YoableSeg
 
         public HashSet<LabelData> SelectedLabels { get; set; } = new();
         private static List<LabelData> clipboard = new();
-        private Stack<List<LabelData>> undoStack = new();
-        private Stack<List<LabelData>> redoStack = new();
-        private const int MaxUndoSteps = 20;
+
+        public event Action<List<LabelData>> BeforeLabelChange;
 
         public ListBox LabelListBox { get; set; }
         public Rect CurrentRect { get; set; }
         public bool IsDrawingBox { get; set; }
-        public bool IsDragging { get; set; }
         public bool IsWaitingForSam { get; set; }
         public Point cursorPosition { get; set; } = new Point(0, 0);
         public Point StartPoint { get; set; }
-        public Point DragStart { get; set; }
         public Matrix TransformMatrix { get; set; } = Matrix.Identity;
 
         private const double ClickDragThreshold = 3.0;
@@ -144,8 +141,9 @@ namespace YoableSeg
         private const double zoomStep = 0.1;
         private Point zoomCenter = new Point(0, 0);
         private Matrix transformMatrix = Matrix.Identity;
-        private bool hasMovedPolygons = false;
         private bool mouseDownOnEmpty = false;
+        private LabelData mouseDownLabel = null;
+        private LabelData previouslySelectedLabel = null;
 
 
         public DrawingCanvas()
@@ -162,81 +160,15 @@ namespace YoableSeg
             PreviewKeyDown += DrawingCanvas_PreviewKeyDown;
         }
 
-        /// <summary>
-        /// Notifies listeners that labels have been modified
-        /// </summary>
         protected virtual void OnLabelsChanged()
         {
             LabelsChanged?.Invoke(this, EventArgs.Empty);
         }
 
-        // Save current state for undo
-        private void SaveUndoState()
+        protected virtual void OnBeforeLabelChange()
         {
-            var state = Labels.Select(l => new LabelData(l)).ToList();
-            undoStack.Push(state);
-
-            // Limit undo stack size
-            if (undoStack.Count > MaxUndoSteps)
-            {
-                var items = undoStack.ToArray();
-                undoStack.Clear();
-                foreach (var item in items.Take(MaxUndoSteps))
-                {
-                    undoStack.Push(item);
-                }
-            }
-
-            // Clear redo stack when new action is performed
-            redoStack.Clear();
-        }
-
-        // Perform undo
-        private void Undo()
-        {
-            if (undoStack.Count > 0)
-            {
-                // Save current state to redo stack
-                var currentState = Labels.Select(l => new LabelData(l)).ToList();
-                redoStack.Push(currentState);
-
-                // Restore previous state
-                var previousState = undoStack.Pop();
-                Labels.Clear();
-                Labels.AddRange(previousState);
-
-                // Update UI
-                RefreshLabelListBox();
-                SelectedLabel = null;
-                SelectedLabels.Clear();
-                InvalidateVisual();
-
-                OnLabelsChanged();
-            }
-        }
-
-        // Perform redo
-        private void Redo()
-        {
-            if (redoStack.Count > 0)
-            {
-                // Save current state to undo stack
-                var currentState = Labels.Select(l => new LabelData(l)).ToList();
-                undoStack.Push(currentState);
-
-                // Restore next state
-                var nextState = redoStack.Pop();
-                Labels.Clear();
-                Labels.AddRange(nextState);
-
-                // Update UI
-                RefreshLabelListBox();
-                SelectedLabel = null;
-                SelectedLabels.Clear();
-                InvalidateVisual();
-
-                OnLabelsChanged();
-            }
+            var snapshot = Labels.Select(l => new LabelData(l)).ToList();
+            BeforeLabelChange?.Invoke(snapshot);
         }
 
         // Copy selected labels
@@ -275,7 +207,7 @@ namespace YoableSeg
         {
             if (clipboard.Count == 0) return;
 
-            SaveUndoState();
+            OnBeforeLabelChange();
             SelectedLabels.Clear();
 
             double offsetX = 20;
@@ -411,8 +343,6 @@ namespace YoableSeg
             Labels.Clear();
             SelectedLabel = null;
             SelectedLabels.Clear();
-            undoStack.Clear();
-            redoStack.Clear();
             LabelListBox?.Items.Clear();
             
             CalculateImageDisplayRect();
@@ -562,7 +492,7 @@ namespace YoableSeg
                     currentIndex = currentIndex >= availableClasses.Count - 1 ? 0 : currentIndex + 1;
                 }
 
-                SaveUndoState();
+                OnBeforeLabelChange();
                 var newClassId = availableClasses[currentIndex].ClassId;
                 
                 // Update all selected labels
@@ -671,7 +601,16 @@ namespace YoableSeg
         {
             cursorPosition = e.GetPosition(this);
 
-            if (mouseDownOnEmpty && !IsDrawingBox && !IsDragging)
+            if (imageDisplayRect.Contains(cursorPosition) && Properties.Settings.Default.EnableCrosshair)
+            {
+                Cursor = Cursors.None;
+            }
+            else
+            {
+                Cursor = Cursors.Arrow;
+            }
+
+            if (mouseDownOnEmpty && !IsDrawingBox)
             {
                 double distance = Math.Sqrt(
                     Math.Pow(cursorPosition.X - StartPoint.X, 2) +
@@ -696,41 +635,6 @@ namespace YoableSeg
                 return;
             }
 
-            if (IsDragging && (SelectedLabel != null || SelectedLabels.Count > 0))
-            {
-                Point clampedCursor = ClampToBounds(cursorPosition);
-                double dx = clampedCursor.X - DragStart.X;
-                double dy = clampedCursor.Y - DragStart.Y;
-
-                if (Math.Abs(dx) > 0.1 || Math.Abs(dy) > 0.1)
-                {
-                    if (!hasMovedPolygons)
-                    {
-                        SaveUndoState();
-                        hasMovedPolygons = true;
-                    }
-
-                    double scaleX = originalImageDimensions.Width / imageDisplayRect.Width;
-                    double scaleY = originalImageDimensions.Height / imageDisplayRect.Height;
-                    double imageDx = dx * scaleX;
-                    double imageDy = dy * scaleY;
-
-                    if (SelectedLabels.Count > 0)
-                    {
-                        foreach (var label in SelectedLabels)
-                        {
-                            label.Translate(imageDx, imageDy);
-                        }
-                    }
-                    else if (SelectedLabel != null)
-                    {
-                        SelectedLabel.Translate(imageDx, imageDy);
-                    }
-
-                    DragStart = clampedCursor;
-                }
-            }
-
             InvalidateVisual();
         }
 
@@ -745,6 +649,8 @@ namespace YoableSeg
 
         private async void DrawingCanvas_MouseUp(object sender, MouseButtonEventArgs e)
         {
+            Mouse.Capture(null);
+
             if (IsWaitingForSam)
             {
                 mouseDownOnEmpty = false;
@@ -754,42 +660,111 @@ namespace YoableSeg
                 return;
             }
 
-            if (mouseDownOnEmpty)
+            var endPoint = e.GetPosition(this);
+            double distance = Math.Sqrt(
+                Math.Pow(endPoint.X - StartPoint.X, 2) +
+                Math.Pow(endPoint.Y - StartPoint.Y, 2));
+
+            bool wasDrawingBox = IsDrawingBox && CurrentRect.Width > 1 && CurrentRect.Height > 1;
+            Rect savedRect = CurrentRect;
+
+            IsDrawingBox = false;
+            CurrentRect = new Rect(0, 0, 0, 0);
+            mouseDownOnEmpty = false;
+
+            if (distance < ClickDragThreshold)
             {
-                var endPoint = e.GetPosition(this);
-                double distance = Math.Sqrt(
-                    Math.Pow(endPoint.X - StartPoint.X, 2) +
-                    Math.Pow(endPoint.Y - StartPoint.Y, 2));
-
-                bool wasDrawingBox = IsDrawingBox && CurrentRect.Width > 1 && CurrentRect.Height > 1;
-                Rect savedRect = CurrentRect;
-                Point savedPoint = StartPoint;
-
-                IsDrawingBox = false;
-                CurrentRect = new Rect(0, 0, 0, 0);
-                mouseDownOnEmpty = false;
+                HandleLabelClick(endPoint);
                 InvalidateVisual();
-
-                if (wasDrawingBox)
-                {
-                    var imageRect = ScaleRectToImage(savedRect);
-                    await RequestSamMaskFromBoxAsync(imageRect);
-                }
-                
                 return;
             }
 
-            if (IsDragging && hasMovedPolygons)
+            if (wasDrawingBox)
             {
-                OnLabelsChanged();
+                var imageRect = ScaleRectToImage(savedRect);
+                await RequestSamMaskFromBoxAsync(imageRect);
             }
 
-            IsDragging = false;
-            hasMovedPolygons = false;
-            IsDrawingBox = false;
-            CurrentRect = new Rect(0, 0, 0, 0);
-            Mouse.Capture(null);
             InvalidateVisual();
+        }
+
+        private void HandleLabelClick(Point mousePos)
+        {
+            bool ctrlPressed = Keyboard.IsKeyDown(Key.LeftCtrl) || Keyboard.IsKeyDown(Key.RightCtrl);
+            var imageMousePos = ScalePointToImage(mousePos);
+
+            var overlappingLabels = new List<LabelData>();
+            for (int i = Labels.Count - 1; i >= 0; i--)
+            {
+                var label = Labels[i];
+                if (!label.IsValid()) continue;
+
+                if (label.ContainsPoint(imageMousePos))
+                {
+                    overlappingLabels.Add(label);
+                }
+            }
+
+            if (overlappingLabels.Count == 0)
+            {
+                previouslySelectedLabel = null;
+                return;
+            }
+
+            LabelData clickedLabel = overlappingLabels[0];
+
+            if (!ctrlPressed && previouslySelectedLabel != null && overlappingLabels.Contains(previouslySelectedLabel))
+            {
+                if (overlappingLabels.Count == 1)
+                {
+                    previouslySelectedLabel = null;
+                    return;
+                }
+                else
+                {
+                    int currentIndex = overlappingLabels.IndexOf(previouslySelectedLabel);
+                    int nextIndex = (currentIndex + 1) % overlappingLabels.Count;
+                    clickedLabel = overlappingLabels[nextIndex];
+                }
+            }
+            
+            previouslySelectedLabel = null;
+
+            if (ctrlPressed)
+            {
+                if (SelectedLabels.Contains(clickedLabel))
+                {
+                    SelectedLabels.Remove(clickedLabel);
+                    SelectedLabel = SelectedLabels.FirstOrDefault();
+                }
+                else
+                {
+                    SelectedLabels.Add(clickedLabel);
+                    SelectedLabel = clickedLabel;
+                }
+            }
+            else
+            {
+                SelectedLabels.Clear();
+                SelectedLabels.Add(clickedLabel);
+                SelectedLabel = clickedLabel;
+            }
+
+            if (LabelListBox != null)
+            {
+                if (!ctrlPressed && SelectedLabel != null)
+                {
+                    LabelListBox.SelectedItem = SelectedLabel.Name;
+                }
+                else if (ctrlPressed && SelectedLabels.Count == 1 && SelectedLabel != null)
+                {
+                    LabelListBox.SelectedItem = SelectedLabel.Name;
+                }
+                else if (SelectedLabels.Count == 0 || SelectedLabels.Count > 1)
+                {
+                    LabelListBox.SelectedItem = null;
+                }
+            }
         }
 
         private async Task RequestSamMaskFromBoxAsync(Rect imageBox)
@@ -821,7 +796,7 @@ namespace YoableSeg
                 }
                 else
                 {
-                    SaveUndoState();
+                    OnBeforeLabelChange();
                     var newLabel = new LabelData($"Label {Labels.Count + 1}", polygonPoints, CurrentClassId);
                     Labels.Add(newLabel);
 
@@ -852,72 +827,27 @@ namespace YoableSeg
             Keyboard.Focus(this);
 
             Point mousePos = e.GetPosition(this);
-            bool handled = false;
-            bool ctrlPressed = Keyboard.IsKeyDown(Key.LeftCtrl) || Keyboard.IsKeyDown(Key.RightCtrl);
-
-            hasMovedPolygons = false;
-            mouseDownOnEmpty = false;
+            StartPoint = mousePos;
+            mouseDownOnEmpty = true;
+            CurrentRect = new Rect(StartPoint, new Size(0, 0));
 
             var imageMousePos = ScalePointToImage(mousePos);
-
+            mouseDownLabel = null;
             for (int i = Labels.Count - 1; i >= 0; i--)
             {
                 var label = Labels[i];
-                if (!label.IsValid()) continue;
-
-                if (label.ContainsPoint(imageMousePos))
+                if (label.IsValid() && label.ContainsPoint(imageMousePos))
                 {
-                    if (ctrlPressed)
-                    {
-                        if (SelectedLabels.Contains(label))
-                        {
-                            SelectedLabels.Remove(label);
-                            SelectedLabel = SelectedLabels.FirstOrDefault();
-                        }
-                        else
-                        {
-                            SelectedLabels.Add(label);
-                            SelectedLabel = label;
-                        }
-                    }
-                    else
-                    {
-                        SelectedLabels.Clear();
-                        SelectedLabels.Add(label);
-                        SelectedLabel = label;
-                    }
-
-                    IsDragging = true;
-                    DragStart = mousePos;
-                    handled = true;
+                    mouseDownLabel = label;
                     break;
                 }
             }
 
+            previouslySelectedLabel = SelectedLabel;
+            SelectedLabel = null;
+            SelectedLabels.Clear();
             if (LabelListBox != null)
-            {
-                if (!ctrlPressed && SelectedLabel != null)
-                {
-                    LabelListBox.SelectedItem = SelectedLabel.Name;
-                }
-                else if (ctrlPressed && SelectedLabels.Count == 1 && SelectedLabel != null)
-                {
-                    LabelListBox.SelectedItem = SelectedLabel.Name;
-                }
-                else if (SelectedLabels.Count == 0 || SelectedLabels.Count > 1)
-                {
-                    LabelListBox.SelectedItem = null;
-                }
-            }
-
-            if (!handled)
-            {
-                mouseDownOnEmpty = true;
-                StartPoint = mousePos;
-                CurrentRect = new Rect(StartPoint, new Size(0, 0));
-                SelectedLabel = null;
-                SelectedLabels.Clear();
-            }
+                LabelListBox.SelectedItem = null;
 
             Mouse.Capture(this);
             InvalidateVisual();
@@ -925,39 +855,8 @@ namespace YoableSeg
 
         private void DrawingCanvas_MouseLeave(object sender, MouseEventArgs e)
         {
+            Cursor = Cursors.Arrow;
             InvalidateVisual();
-        }
-
-
-        protected override void OnMouseDown(MouseButtonEventArgs e)
-        {
-            Point mousePos = e.GetPosition(this);
-            var imageMousePos = ScalePointToImage(mousePos);
-
-            bool clickedOnLabel = false;
-            foreach (var label in Labels)
-            {
-                if (!label.IsValid()) continue;
-                if (label.ContainsPoint(imageMousePos))
-                {
-                    SelectedLabel = label;
-                    SelectedLabels.Clear();
-                    SelectedLabels.Add(label);
-                    clickedOnLabel = true;
-                    break;
-                }
-            }
-
-            if (!clickedOnLabel)
-            {
-                SelectedLabel = null;
-                SelectedLabels.Clear();
-                if (LabelListBox != null)
-                    LabelListBox.SelectedItem = null;
-            }
-
-            InvalidateVisual();
-            Keyboard.Focus(this);
         }
 
         private void DrawingCanvas_PreviewKeyDown(object sender, KeyEventArgs e)
@@ -976,16 +875,6 @@ namespace YoableSeg
                         e.Handled = true;
                         return;
 
-                    case Key.Z:
-                        Undo();
-                        e.Handled = true;
-                        return;
-
-                    case Key.Y:
-                        Redo();
-                        e.Handled = true;
-                        return;
-
                     case Key.A:
                         SelectedLabels.Clear();
                         foreach (var label in Labels)
@@ -1001,71 +890,10 @@ namespace YoableSeg
 
             if ((SelectedLabel != null && Labels.Contains(SelectedLabel)) || SelectedLabels.Count > 0)
             {
-                int moveAmount = 1;
-                bool needsUndo = false;
-
                 switch (e.Key)
                 {
-                    case Key.Up:
-                    case Key.Down:
-                    case Key.Left:
-                    case Key.Right:
-                        if (!e.IsRepeat)
-                        {
-                            SaveUndoState();
-                        }
-                        needsUndo = true;
-                        break;
-                }
-
-                switch (e.Key)
-                {
-                    case Key.Up:
-                        if (SelectedLabels.Count > 0)
-                        {
-                            foreach (var label in SelectedLabels) label.Translate(0, -moveAmount);
-                        }
-                        else if (SelectedLabel != null)
-                        {
-                            SelectedLabel.Translate(0, -moveAmount);
-                        }
-                        break;
-
-                    case Key.Down:
-                        if (SelectedLabels.Count > 0)
-                        {
-                            foreach (var label in SelectedLabels) label.Translate(0, moveAmount);
-                        }
-                        else if (SelectedLabel != null)
-                        {
-                            SelectedLabel.Translate(0, moveAmount);
-                        }
-                        break;
-
-                    case Key.Left:
-                        if (SelectedLabels.Count > 0)
-                        {
-                            foreach (var label in SelectedLabels) label.Translate(-moveAmount, 0);
-                        }
-                        else if (SelectedLabel != null)
-                        {
-                            SelectedLabel.Translate(-moveAmount, 0);
-                        }
-                        break;
-
-                    case Key.Right:
-                        if (SelectedLabels.Count > 0)
-                        {
-                            foreach (var label in SelectedLabels) label.Translate(moveAmount, 0);
-                        }
-                        else if (SelectedLabel != null)
-                        {
-                            SelectedLabel.Translate(moveAmount, 0);
-                        }
-                        break;
-
                     case Key.Delete:
-                        SaveUndoState();
+                        OnBeforeLabelChange();
                         if (SelectedLabels.Count > 0)
                         {
                             var labelsToDelete = SelectedLabels.ToList();
@@ -1087,16 +915,10 @@ namespace YoableSeg
                         }
 
                         OnLabelsChanged();
+                        InvalidateVisual();
+                        e.Handled = true;
                         break;
                 }
-
-                if (needsUndo)
-                {
-                    OnLabelsChanged();
-                }
-
-                InvalidateVisual();
-                e.Handled = true;
             }
         }
     }

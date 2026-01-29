@@ -5,8 +5,6 @@ using System.Windows.Media;
 
 namespace YoableSeg
 {
-    // Shared models used across managers
-
     public enum ImageStatus
     {
         NoLabel,

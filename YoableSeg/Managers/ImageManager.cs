@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -204,6 +204,24 @@ namespace YoableSeg.Managers
         public List<string> GetAllImagePaths()
         {
             return imagePathMap.Values.Select(img => img.Path).ToList();
+        }
+
+        public bool RemoveImage(string fileName)
+        {
+            bool removed = imagePathMap.TryRemove(fileName, out _);
+            imageStatuses.TryRemove(fileName, out _);
+            return removed;
+        }
+
+        public bool RestoreImage(string fileName, string filePath, Size originalDimensions, ImageStatus status)
+        {
+            var imageInfo = new ImageInfo(filePath, originalDimensions);
+            bool added = imagePathMap.TryAdd(fileName, imageInfo);
+            if (added)
+            {
+                imageStatuses.TryAdd(fileName, status);
+            }
+            return added;
         }
 
         // Keep the simple ImageInfo class here since it was private in original

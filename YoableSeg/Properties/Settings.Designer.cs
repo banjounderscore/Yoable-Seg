@@ -550,5 +550,17 @@ namespace YoableSeg.Properties {
                 this["MinSam3Confidence"] = value;
             }
         }
+        
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("0.5")]
+        public double NmsIouThreshold {
+            get {
+                return ((double)(this["NmsIouThreshold"]));
+            }
+            set {
+                this["NmsIouThreshold"] = value;
+            }
+        }
     }
 }
