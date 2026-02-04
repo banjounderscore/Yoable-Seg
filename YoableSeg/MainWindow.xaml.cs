@@ -1,10 +1,12 @@
 using Microsoft.Win32;
 using ModernWpf;
+using System;
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
@@ -2148,11 +2150,11 @@ namespace YoableSeg
                 Debug.WriteLine(msg);
             };
             
-            drawingCanvas.RequestSamMask += async (point, box) =>
+            drawingCanvas.RequestLoopMask += async (loopPoints, existingLabels, startingLabelIndex) =>
             {
                 if (!pythonService.IsRunning)
                 {
-                    Debug.WriteLine("SAM3: Service not running, ignoring request");
+                    Debug.WriteLine("SAM3: Service not running, ignoring loop request");
                     MessageBox.Show(
                         "SAM3 is not running yet. Please wait for it to start.",
                         "SAM3 Not Ready",
@@ -2175,18 +2177,21 @@ namespace YoableSeg
 
                 try
                 {
-                    if (!box.HasValue)
+                    // Convert existing labels to polygon format
+                    List<List<double[]>> existingPolygons = null;
+                    if (existingLabels != null && existingLabels.Count > 0)
                     {
-                        return null;
+                        existingPolygons = existingLabels
+                            .Where(label => label.Points != null && label.Points.Count >= 3)
+                            .Select(label => label.Points.Select(p => new double[] { p.X, p.Y }).ToList())
+                            .ToList();
                     }
 
-                    var existingPolygons = GetExistingPolygonsForCurrentImage();
-
-                    var rect = box.Value;
-                    var (success, polygon) = await pythonService.RequestBoxMaskAsync(
-                        imagePath, rect.X, rect.Y, rect.X + rect.Width, rect.Y + rect.Height,
-                        existingPolygons: existingPolygons,
-                        nmsIouThreshold: Properties.Settings.Default.NmsIouThreshold);
+                    var (success, polygon) = await pythonService.RequestLoopMaskAsync(
+                        imagePath,
+                        loopPoints,
+                        existingPolygons,
+                        startingLabelIndex);
                     
                     if (success && polygon != null)
                     {
@@ -2197,10 +2202,10 @@ namespace YoableSeg
                 }
                 catch (Exception ex)
                 {
-                    Debug.WriteLine($"SAM mask request error: {ex.Message}");
+                    Debug.WriteLine($"SAM loop mask request error: {ex.Message}");
                     Debug.WriteLine($"Stack trace: {ex.StackTrace}");
                     MessageBox.Show(
-                        $"SAM3 error: {ex.Message}",
+                        $"SAM3 loop error: {ex.Message}",
                         "SAM3 Error",
                         MessageBoxButton.OK,
                         MessageBoxImage.Error);
@@ -2292,7 +2297,7 @@ namespace YoableSeg
                 return;
             }
 
-            var dialog = new AutoLabelDialog(projectClasses);
+            var dialog = new AutoLabelDialog();
             dialog.Owner = this;
             
             if (dialog.ShowDialog() != true)
@@ -2327,9 +2332,10 @@ namespace YoableSeg
             autoLabelTotal = imagesToProcess.Count;
 
             var prompts = dialog.Prompts;
-            var promptToClassMapping = dialog.PromptToClassMapping;
-            var textThreshold = dialog.TextThreshold;
-            var boxThreshold = dialog.BoxThreshold;
+            var negativePrompts = dialog.NegativePrompts;
+            var currentClassId = drawingCanvas.CurrentClassId;
+            var scoreThreshold = dialog.ScoreThreshold;
+            var maskThreshold = dialog.MaskThreshold;
             var maxInstances = dialog.MaxInstances;
 
             UpdateAutoLabelStatus($"Auto-labeling: 0/{imagesToProcess.Count}");
@@ -2360,10 +2366,10 @@ namespace YoableSeg
                             var results = await PythonServiceManager.Instance.RequestAutoLabelAsync(
                                 imageInfo.Path,
                                 prompts,
-                                promptToClassMapping,
-                                textThreshold,
-                                boxThreshold,
+                                scoreThreshold,
+                                maskThreshold,
                                 maxInstances,
+                                negativePrompts: negativePrompts.Count > 0 ? negativePrompts : null,
                                 existingPolygons: existingPolygons,
                                 nmsIouThreshold: Properties.Settings.Default.NmsIouThreshold);
 
@@ -2371,7 +2377,7 @@ namespace YoableSeg
                             {
                                 var polygons = results.Select(r => (
                                     polygon: r.polygon.Select(p => new System.Windows.Point(p[0], p[1])).ToList(),
-                                    classId: r.classId
+                                    classId: currentClassId
                                 )).ToList();
                                 
                                 var fileName = Path.GetFileName(imageInfo.Path);

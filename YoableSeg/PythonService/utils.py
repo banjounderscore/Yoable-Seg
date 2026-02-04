@@ -233,43 +233,6 @@ def resolve_overlaps(masks: List[np.ndarray], scores: List[float]) -> List[np.nd
     
     return result
 
-def nms_boxes(boxes: List[List[float]], scores: List[float], iou_threshold: float = 0.5) -> List[int]:
-    """Apply Non-Maximum Suppression to boxes."""
-    if not boxes:
-        return []
-    
-    boxes_np = np.array(boxes)
-    scores_np = np.array(scores)
-    
-    x1 = boxes_np[:, 0]
-    y1 = boxes_np[:, 1]
-    x2 = boxes_np[:, 2]
-    y2 = boxes_np[:, 3]
-    
-    areas = (x2 - x1) * (y2 - y1)
-    order = scores_np.argsort()[::-1]
-    
-    keep = []
-    while order.size > 0:
-        i = order[0]
-        keep.append(i)
-        
-        xx1 = np.maximum(x1[i], x1[order[1:]])
-        yy1 = np.maximum(y1[i], y1[order[1:]])
-        xx2 = np.minimum(x2[i], x2[order[1:]])
-        yy2 = np.minimum(y2[i], y2[order[1:]])
-        
-        w = np.maximum(0, xx2 - xx1)
-        h = np.maximum(0, yy2 - yy1)
-        
-        intersection = w * h
-        iou = intersection / (areas[i] + areas[order[1:]] - intersection)
-        
-        inds = np.where(iou <= iou_threshold)[0]
-        order = order[inds + 1]
-    
-    return keep
-
 
 def polygon_to_mask(polygon: List[List[float]], height: int, width: int) -> np.ndarray:
     """Convert polygon to binary mask."""
@@ -332,3 +295,515 @@ def filter_duplicate_polygons(
             keep_indices.append(i)
     
     return keep_indices
+
+
+def polygon_area(polygon: List[List[float]]) -> float:
+    """Calculate the area of a polygon using the shoelace formula."""
+    if not polygon or len(polygon) < 3:
+        return 0.0
+    
+    area = 0.0
+    n = len(polygon)
+    for i in range(n):
+        j = (i + 1) % n
+        area += polygon[i][0] * polygon[j][1]
+        area -= polygon[j][0] * polygon[i][1]
+    return abs(area) / 2.0
+
+
+def polygon_area_outside_loop(polygon: List[List[float]], loop: List[List[float]], 
+                               height: int, width: int) -> float:
+    """Calculate the area of polygon that lies outside the user loop using Shapely."""
+    from shapely.geometry import Polygon
+    from shapely.validation import make_valid
+    
+    try:
+        poly_shape = Polygon([(pt[0], pt[1]) for pt in polygon])
+        loop_shape = Polygon([(pt[0], pt[1]) for pt in loop])
+        
+        # Ensure polygons are valid
+        if not poly_shape.is_valid:
+            poly_shape = make_valid(poly_shape)
+        if not loop_shape.is_valid:
+            loop_shape = make_valid(loop_shape)
+        
+        # Area of polygon NOT in loop = polygon - (polygon ∩ loop)
+        outside = poly_shape.difference(loop_shape)
+        return float(outside.area)
+    except Exception as e:
+        logger.warning(f"Shapely polygon operation failed: {e}, falling back to mask method")
+        # Fallback to mask method if Shapely fails
+        poly_mask = polygon_to_mask(polygon, height, width)
+        loop_mask = polygon_to_mask(loop, height, width)
+        outside = np.logical_and(poly_mask, ~loop_mask)
+        return float(np.sum(outside))
+
+
+def loop_area_outside_polygon(loop: List[List[float]], polygon: List[List[float]], 
+                               height: int, width: int) -> float:
+    """Calculate the area of user loop that lies outside the polygon using Shapely."""
+    from shapely.geometry import Polygon
+    from shapely.validation import make_valid
+    
+    try:
+        poly_shape = Polygon([(pt[0], pt[1]) for pt in polygon])
+        loop_shape = Polygon([(pt[0], pt[1]) for pt in loop])
+        
+        # Ensure polygons are valid
+        if not poly_shape.is_valid:
+            poly_shape = make_valid(poly_shape)
+        if not loop_shape.is_valid:
+            loop_shape = make_valid(loop_shape)
+        
+        # Area of loop NOT in polygon = loop - (loop ∩ polygon)
+        outside = loop_shape.difference(poly_shape)
+        return float(outside.area)
+    except Exception as e:
+        logger.warning(f"Shapely polygon operation failed: {e}, falling back to mask method")
+        # Fallback to mask method if Shapely fails
+        poly_mask = polygon_to_mask(polygon, height, width)
+        loop_mask = polygon_to_mask(loop, height, width)
+        outside = np.logical_and(loop_mask, ~poly_mask)
+        return float(np.sum(outside))
+
+
+def compute_polygon_match_score(polygon: List[List[float]], loop: List[List[float]], 
+                                 height: int, width: int) -> float:
+    """
+    Compute area-based matching score for polygon selection using pure polygon operations.
+    score = |polygon outside loop| + |loop outside polygon|
+    Lower score = better match.
+    
+    Uses Shapely for precise polygon operations without mask conversion.
+    """
+    a_out = polygon_area_outside_loop(polygon, loop, height, width)
+    a_in = loop_area_outside_polygon(loop, polygon, height, width)
+    return a_out + a_in
+
+
+def point_in_polygon(point: Tuple[float, float], polygon: List[List[float]]) -> bool:
+    """Check if a point is inside a polygon using ray casting algorithm."""
+    x, y = point
+    n = len(polygon)
+    inside = False
+    
+    j = n - 1
+    for i in range(n):
+        xi, yi = polygon[i]
+        xj, yj = polygon[j]
+        
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+            inside = not inside
+        
+        j = i
+    
+    return inside
+
+
+def clip_polygon_to_region(polygon: List[List[float]], region_mask: np.ndarray) -> np.ndarray:
+    """
+    Clip a polygon to only include the portion inside a region mask.
+    Returns a binary mask of the clipped polygon.
+    """
+    poly_mask = polygon_to_mask(polygon, region_mask.shape[0], region_mask.shape[1])
+    clipped = np.logical_and(poly_mask, region_mask)
+    return clipped.astype(np.uint8)
+
+
+def detect_and_fill_boundary_gaps(polygon_mask: np.ndarray, existing_label_mask: np.ndarray) -> np.ndarray:
+    """
+    Detect and fill gaps along the boundary where polygon meets existing label.
+    
+    This ensures continuity by filling minimal regions required to connect
+    the polygon segment to the external edge of the existing label.
+    
+    Args:
+        polygon_mask: Binary mask of the selected polygon segment (inside loop, outside existing label)
+        existing_label_mask: Binary mask of the existing label
+    
+    Returns:
+        Binary mask with gaps filled
+    """
+    # Find the boundary of the existing label (external edge)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    existing_dilated = cv2.dilate(existing_label_mask, kernel, iterations=1)
+    existing_boundary = existing_dilated - existing_label_mask
+    
+    # Find the boundary of the polygon segment
+    polygon_dilated = cv2.dilate(polygon_mask, kernel, iterations=1)
+    polygon_boundary = polygon_dilated - polygon_mask
+    
+    # Find regions where boundaries are close but not touching
+    # These are potential gaps that need filling
+    close_proximity = cv2.dilate(polygon_boundary, kernel, iterations=2)
+    potential_gaps = np.logical_and(close_proximity, existing_boundary)
+    
+    if not np.any(potential_gaps):
+        return polygon_mask  # No gaps to fill
+    
+    # Fill the gaps by connecting nearby regions
+    # Use morphological closing to bridge small gaps
+    combined = np.logical_or(polygon_mask, existing_label_mask)
+    closing_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    filled_combined = cv2.morphologyEx(combined.astype(np.uint8), cv2.MORPH_CLOSE, closing_kernel)
+    
+    # Extract only the new filled regions (not part of original existing label)
+    new_filled = np.logical_and(filled_combined, ~existing_label_mask)
+    
+    return new_filled.astype(np.uint8)
+
+
+def get_loop_bounding_box(loop: List[List[float]]) -> List[float]:
+    """Get bounding box of a loop/polygon in [x1, y1, x2, y2] format."""
+    xs = [p[0] for p in loop]
+    ys = [p[1] for p in loop]
+    return [min(xs), min(ys), max(xs), max(ys)]
+
+
+def combine_bounding_boxes(bbox1: List[float], bbox2: List[float]) -> List[float]:
+    """
+    Combine two bounding boxes into a single bounding box that encompasses both.
+    
+    Args:
+        bbox1: First bounding box [x1, y1, x2, y2]
+        bbox2: Second bounding box [x1, y1, x2, y2]
+    
+    Returns:
+        Combined bounding box [x1, y1, x2, y2]
+    """
+    return [
+        min(bbox1[0], bbox2[0]),  # x1
+        min(bbox1[1], bbox2[1]),  # y1
+        max(bbox1[2], bbox2[2]),  # x2
+        max(bbox1[3], bbox2[3])   # y2
+    ]
+
+
+def expand_box(box: List[float], expansion_factor: float = 0.25, 
+               image_width: Optional[int] = None, 
+               image_height: Optional[int] = None) -> List[float]:
+    """
+    Expand a bounding box by a factor.
+    
+    Args:
+        box: [x1, y1, x2, y2] bounding box
+        expansion_factor: Factor to expand the box by
+        image_width: Optional image width to clamp x coordinates
+        image_height: Optional image height to clamp y coordinates
+    
+    Returns:
+        Expanded bounding box [x1, y1, x2, y2]
+    """
+    x1, y1, x2, y2 = box
+    width = x2 - x1
+    height = y2 - y1
+    
+    expand_w = width * expansion_factor
+    expand_h = height * expansion_factor
+    
+    expanded = [
+        max(0, x1 - expand_w),
+        max(0, y1 - expand_h),
+        x2 + expand_w,
+        y2 + expand_h
+    ]
+    
+    # Clamp to image bounds if provided
+    if image_width is not None:
+        expanded[0] = max(0, expanded[0])
+        expanded[2] = min(image_width, expanded[2])
+    
+    if image_height is not None:
+        expanded[1] = max(0, expanded[1])
+        expanded[3] = min(image_height, expanded[3])
+    
+    return expanded
+
+
+def get_polygons_in_vicinity(all_polygons: List[List[List[float]]], 
+                              loop_bbox: List[float], 
+                              expansion: float = 50.0) -> List[int]:
+    """
+    Get indices of polygons that are in the vicinity of the loop bounding box.
+    
+    Args:
+        all_polygons: List of all available polygons
+        loop_bbox: Bounding box of the loop [x1, y1, x2, y2]
+        expansion: How much to expand the search area (in pixels)
+    
+    Returns:
+        List of indices of polygons within the vicinity
+    """
+    x1, y1, x2, y2 = loop_bbox
+    x1 -= expansion
+    y1 -= expansion
+    x2 += expansion
+    y2 += expansion
+    
+    vicinity_indices = []
+    for idx, polygon in enumerate(all_polygons):
+        # Check if any vertex of the polygon is within the expanded bbox
+        for point in polygon:
+            if x1 <= point[0] <= x2 and y1 <= point[1] <= y2:
+                vicinity_indices.append(idx)
+                break
+    
+    return vicinity_indices
+
+
+def segment_polygon_by_label(polygon: List[List[float]], 
+                              label_mask: np.ndarray) -> List[List[int]]:
+    """
+    Divide polygon vertices into segments that are outside the label.
+    
+    Each segment is a consecutive sequence of vertices that are all outside the label.
+    Vertices inside the label act as segment boundaries.
+    
+    Args:
+        polygon: List of [x, y] coordinates
+        label_mask: Binary mask of the label
+    
+    Returns:
+        List of segments, where each segment is a list of vertex indices
+    """
+    if not polygon or len(polygon) < 2:
+        return []
+    
+    height, width = label_mask.shape
+    
+    # Check which vertices are outside the label
+    outside_status = []
+    for point in polygon:
+        x, y = int(round(point[0])), int(round(point[1]))
+        # Clamp to image bounds
+        x = max(0, min(width - 1, x))
+        y = max(0, min(height - 1, y))
+        
+        is_outside = (label_mask[y, x] == 0)
+        outside_status.append(is_outside)
+    
+    # Find consecutive segments of vertices that are outside
+    segments = []
+    current_segment = []
+    
+    for i, is_outside in enumerate(outside_status):
+        if is_outside:
+            current_segment.append(i)
+        else:
+            if current_segment:
+                segments.append(current_segment)
+                current_segment = []
+    
+    # Don't forget the last segment
+    if current_segment:
+        # Check if this segment wraps around to the beginning
+        if segments and outside_status[0]:
+            # Merge with the first segment (wraps around)
+            segments[0] = current_segment + segments[0]
+        else:
+            segments.append(current_segment)
+    
+    return segments
+
+
+def compute_segment_match_score(polygon: List[List[float]], 
+                                segment_indices: List[int],
+                                loop_points: List[List[float]],
+                                loop_mask: np.ndarray,
+                                height: int, 
+                                width: int) -> float:
+    """
+    Compute match score for a polygon segment against the loop.
+    
+    The score is: |segment area outside loop| + |loop area outside segment|
+    Lower score = better match.
+    
+    Args:
+        polygon: Full polygon coordinates
+        segment_indices: Indices of vertices in this segment
+        loop_points: User-drawn loop coordinates
+        loop_mask: Binary mask of the loop
+        height: Image height
+        width: Image width
+    
+    Returns:
+        Match score (lower is better)
+    """
+    if not segment_indices or len(segment_indices) < 2:
+        return float('inf')
+    
+    # Create a mask for just this segment by drawing edges between consecutive vertices
+    segment_mask = np.zeros((height, width), dtype=np.uint8)
+    
+    # Draw the segment edges
+    for i in range(len(segment_indices)):
+        idx1 = segment_indices[i]
+        idx2 = segment_indices[(i + 1) % len(segment_indices)] if i < len(segment_indices) - 1 else segment_indices[0]
+        
+        # Only draw edge if consecutive in the original polygon
+        if idx2 == (idx1 + 1) % len(polygon):
+            pt1 = (int(round(polygon[idx1][0])), int(round(polygon[idx1][1])))
+            pt2 = (int(round(polygon[idx2][0])), int(round(polygon[idx2][1])))
+            cv2.line(segment_mask, pt1, pt2, 1, thickness=2)
+    
+    # Also create a small region around the segment for area calculations
+    # Dilate the segment edges to create a thin mask region
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    segment_region = cv2.dilate(segment_mask, kernel, iterations=2)
+    
+    # Compute areas:
+    # 1. Segment region outside loop
+    outside_loop = np.logical_and(segment_region, ~loop_mask)
+    area_outside = float(np.sum(outside_loop))
+    
+    # 2. Loop outside segment region
+    outside_segment = np.logical_and(loop_mask, ~segment_region)
+    area_inside = float(np.sum(outside_segment))
+    
+    return area_outside + area_inside
+
+
+def find_best_matching_segment(all_polygons: List[List[List[float]]],
+                                loop_points: List[List[float]],
+                                label_mask: np.ndarray,
+                                height: int,
+                                width: int) -> Optional[Tuple[int, List[int], float]]:
+    """
+    Find the polygon segment that best matches the loop while outside the label.
+    
+    This implements the special case logic:
+    1. Get polygons in vicinity of the loop
+    2. For each polygon, divide vertices into segments that are outside the label
+    3. For each segment, compute match score
+    4. Return the best matching segment
+    
+    Args:
+        all_polygons: List of all available polygons
+        loop_points: User-drawn loop coordinates
+        label_mask: Binary mask of the starting label
+        height: Image height
+        width: Image width
+    
+    Returns:
+        Tuple of (polygon_index, segment_vertex_indices, score) or None if no match found
+    """
+    if not all_polygons or not loop_points:
+        return None
+    
+    # Create loop mask
+    loop_mask = polygon_to_mask(loop_points, height, width)
+    
+    # Get loop bounding box to find nearby polygons
+    loop_bbox = get_loop_bounding_box(loop_points)
+    vicinity_indices = get_polygons_in_vicinity(all_polygons, loop_bbox)
+    
+    if not vicinity_indices:
+        return None
+    
+    best_match = None
+    best_score = float('inf')
+    
+    # For each polygon in vicinity
+    for poly_idx in vicinity_indices:
+        polygon = all_polygons[poly_idx]
+        
+        # Divide polygon into segments outside the label
+        segments = segment_polygon_by_label(polygon, label_mask)
+        
+        # For each segment, compute match score
+        for segment_indices in segments:
+            if len(segment_indices) < 2:
+                continue
+            
+            score = compute_segment_match_score(
+                polygon, 
+                segment_indices, 
+                loop_points, 
+                loop_mask,
+                height, 
+                width
+            )
+            
+            if score < best_score:
+                best_score = score
+                best_match = (poly_idx, segment_indices, score)
+    
+    return best_match
+
+
+def create_special_case_polygon(loop_points: List[List[float]],
+                                label_polygon: List[List[float]],
+                                label_mask: np.ndarray,
+                                height: int,
+                                width: int) -> List[List[float]]:
+    """
+    Create polygon for special case: loop that starts inside label, goes outside, returns inside.
+    
+    The final polygon consists of:
+    1. The portion of the loop that's outside the label
+    2. The label border segments that connect the exit and entry points
+    
+    Args:
+        loop_points: User-drawn loop coordinates
+        label_polygon: The polygon of the starting/ending label
+        label_mask: Binary mask of the starting label
+        height: Image height
+        width: Image width
+    
+    Returns:
+        Final polygon coordinates
+    """
+    if not loop_points or not label_polygon:
+        return loop_points
+    
+    # Find where loop exits and enters the label
+    exit_points = []
+    enter_points = []
+    
+    for i in range(len(loop_points) - 1):
+        pt1 = loop_points[i]
+        pt2 = loop_points[i + 1]
+        
+        x1, y1 = int(round(pt1[0])), int(round(pt1[1]))
+        x2, y2 = int(round(pt2[0])), int(round(pt2[1]))
+        
+        # Clamp to bounds
+        x1 = max(0, min(width - 1, x1))
+        y1 = max(0, min(height - 1, y1))
+        x2 = max(0, min(width - 1, x2))
+        y2 = max(0, min(height - 1, y2))
+        
+        inside1 = label_mask[y1, x1] > 0
+        inside2 = label_mask[y2, x2] > 0
+        
+        # Transition from inside to outside = exit point
+        if inside1 and not inside2:
+            exit_points.append(i + 1)  # The point that's outside
+        
+        # Transition from outside to inside = enter point
+        if not inside1 and inside2:
+            enter_points.append(i + 1)  # The point that's inside
+    
+    # If we found exit and entry points, construct the final polygon
+    if exit_points and enter_points:
+        # Take the first exit and last enter
+        exit_idx = exit_points[0]
+        enter_idx = enter_points[-1]
+        
+        # The loop portion outside the label
+        outside_portion = loop_points[exit_idx:enter_idx]
+        
+        # Find closest points on label border to connect
+        # For simplicity, we'll use the loop points at exit/enter as connection points
+        # In a more sophisticated implementation, you'd find the actual intersection points
+        
+        # Create the final polygon: outside portion + border connection
+        final_polygon = outside_portion.copy()
+        
+        # Add border connection (simplified - just close the polygon)
+        # In reality, you'd trace along the label border
+        if final_polygon and len(final_polygon) >= 3:
+            return final_polygon
+    
+    # Fallback: just return the loop
+    return loop_points

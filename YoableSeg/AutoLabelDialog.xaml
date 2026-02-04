@@ -3,60 +3,44 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:ui="http://schemas.modernwpf.com/2019"
         ui:WindowHelper.UseModernWindowStyle="True"
-        Title="Auto Label with GroundingDINO + SAM3" 
-        Height="550" Width="500"
+        Title="Auto Label with SAM3" 
+        Height="675" Width="500"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize">
     <Grid Margin="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
         <StackPanel Grid.Row="0" Margin="0,0,0,15">
-            <TextBlock Text="Text Prompts" FontWeight="SemiBold" FontSize="14" Margin="0,0,0,5"/>
-            <TextBlock Text="Enter prompts to detect (one per line):" 
-                       Foreground="Gray" FontSize="12" Margin="0,0,0,8"/>
+            <TextBlock Text="Positive Prompts (what to detect)" FontWeight="SemiBold" FontSize="14" Margin="0,0,0,5"/>
+            <TextBlock Text="Enter prompts to detect (one per line). All detections will use the currently selected class:" 
+                       Foreground="Gray" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"/>
             <TextBox x:Name="PromptsTextBox" 
                      AcceptsReturn="True" 
                      TextWrapping="Wrap"
-                     Height="100"
+                     Height="80"
                      VerticalScrollBarVisibility="Auto"
-                     Text="humanoid character&#x0a;human-shaped body&#x0a;player character"/>
+                     Text="person"/>
         </StackPanel>
 
         <StackPanel Grid.Row="1" Margin="0,0,0,15">
-            <TextBlock Text="Prompt to Class Mapping" FontWeight="SemiBold" FontSize="14" Margin="0,0,0,5"/>
-            <TextBlock Text="Assign each prompt to a class:" 
-                       Foreground="Gray" FontSize="12" Margin="0,0,0,8"/>
-            <ListView x:Name="MappingListView" 
-                      Height="120"
-                      BorderBrush="Gray"
-                      BorderThickness="1">
-                <ListView.View>
-                    <GridView>
-                        <GridViewColumn Header="Prompt" Width="200" DisplayMemberBinding="{Binding Prompt}"/>
-                        <GridViewColumn Header="Class" Width="200">
-                            <GridViewColumn.CellTemplate>
-                                <DataTemplate>
-                                    <ComboBox ItemsSource="{Binding AvailableClasses}"
-                                              SelectedItem="{Binding SelectedClass}"
-                                              DisplayMemberPath="Name"
-                                              Width="170"/>
-                                </DataTemplate>
-                            </GridViewColumn.CellTemplate>
-                        </GridViewColumn>
-                    </GridView>
-                </ListView.View>
-            </ListView>
-            <Button Content="Update Mapping" Click="UpdateMapping_Click" 
-                    Margin="0,8,0,0" HorizontalAlignment="Left"/>
+            <TextBlock Text="Negative Prompts (what to exclude)" FontWeight="SemiBold" FontSize="14" Margin="0,0,0,5"/>
+            <TextBlock Text="Optional: Objects matching these prompts will be excluded (e.g., 'gun' to avoid labeling guns held by people):" 
+                       Foreground="Gray" FontSize="12" Margin="0,0,0,8" TextWrapping="Wrap"/>
+            <TextBox x:Name="NegativePromptsTextBox" 
+                     AcceptsReturn="True" 
+                     TextWrapping="Wrap"
+                     Height="60"
+                     VerticalScrollBarVisibility="Auto"
+                     Text=""/>
         </StackPanel>
 
-        <GroupBox Grid.Row="2" Header="Thresholds" Margin="0,0,0,15">
+        <GroupBox Grid.Row="2" Header="Settings" Margin="0,0,0,15">
             <Grid Margin="10">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
@@ -68,19 +52,19 @@
                 </Grid.RowDefinitions>
                 
                 <StackPanel Grid.Column="0" Grid.Row="0" Margin="0,0,10,10">
-                    <TextBlock Text="Text Threshold:" Margin="0,0,0,5"/>
-                    <Slider x:Name="TextThresholdSlider" 
-                            Minimum="0" Maximum="1" Value="0.25"
+                    <TextBlock Text="Score Threshold:" Margin="0,0,0,5"/>
+                    <Slider x:Name="ScoreThresholdSlider" 
+                            Minimum="0" Maximum="1" Value="0.5"
                             TickFrequency="0.05" IsSnapToTickEnabled="True"/>
-                    <TextBlock x:Name="TextThresholdValue" Text="0.25"/>
+                    <TextBlock x:Name="ScoreThresholdValue" Text="0.50"/>
                 </StackPanel>
                 
                 <StackPanel Grid.Column="1" Grid.Row="0" Margin="10,0,0,10">
-                    <TextBlock Text="Box Threshold:" Margin="0,0,0,5"/>
-                    <Slider x:Name="BoxThresholdSlider" 
-                            Minimum="0" Maximum="1" Value="0.25"
+                    <TextBlock Text="Mask Threshold:" Margin="0,0,0,5"/>
+                    <Slider x:Name="MaskThresholdSlider" 
+                            Minimum="0" Maximum="1" Value="0.5"
                             TickFrequency="0.05" IsSnapToTickEnabled="True"/>
-                    <TextBlock x:Name="BoxThresholdValue" Text="0.25"/>
+                    <TextBlock x:Name="MaskThresholdValue" Text="0.50"/>
                 </StackPanel>
                 
                 <StackPanel Grid.Column="0" Grid.Row="1" Margin="0,0,10,0">

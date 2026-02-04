@@ -227,7 +227,7 @@
                     </MenuItem.Icon>
                 </MenuItem>
                 <Separator/>
-                <MenuItem Header="Auto Label (GroundingDINO + SAM3)" Click="RunAutoLabel_Click">
+                <MenuItem Header="Auto Label (SAM3 Text Prompts)" Click="RunAutoLabel_Click">
                     <MenuItem.Icon>
                         <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE8FE;" FontSize="16" Foreground="#FF00BCD4"/>
                     </MenuItem.Icon>

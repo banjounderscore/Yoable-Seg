@@ -28,19 +28,6 @@ namespace YoableSeg
             ClassId = source.ClassId;
         }
 
-        public Rect GetBoundingBox()
-        {
-            if (Points == null || Points.Count == 0)
-                return Rect.Empty;
-
-            double minX = Points.Min(p => p.X);
-            double minY = Points.Min(p => p.Y);
-            double maxX = Points.Max(p => p.X);
-            double maxY = Points.Max(p => p.Y);
-
-            return new Rect(minX, minY, maxX - minX, maxY - minY);
-        }
-
         public bool ContainsPoint(Point testPoint)
         {
             if (Points == null || Points.Count < 3)
@@ -89,7 +76,7 @@ namespace YoableSeg
     public class DrawingCanvas : Canvas
     {
         public event EventHandler LabelsChanged;
-        public event Func<Point, Rect?, Task<List<Point>>> RequestSamMask;
+        public event Func<List<Point>, List<LabelData>, int?, Task<List<Point>>> RequestLoopMask;
 
         public ImageSource Image { get; set; }
         private Size originalImageDimensions;
@@ -129,12 +116,16 @@ namespace YoableSeg
         public event Action<List<LabelData>> BeforeLabelChange;
 
         public ListBox LabelListBox { get; set; }
-        public Rect CurrentRect { get; set; }
-        public bool IsDrawingBox { get; set; }
         public bool IsWaitingForSam { get; set; }
         public Point cursorPosition { get; set; } = new Point(0, 0);
         public Point StartPoint { get; set; }
         public Matrix TransformMatrix { get; set; } = Matrix.Identity;
+
+        // Freehand loop selection state
+        private bool isDrawingLoop = false;
+        private List<Point> loopPoints = new List<Point>();
+        private LabelData startingLabel = null;  // Label where loop started (if any)
+        private int? startingLabelIndex = null;  // Index of starting label in Labels list
 
         private const double ClickDragThreshold = 3.0;
         private double zoomFactor = 1.0;
@@ -254,21 +245,6 @@ namespace YoableSeg
             InvalidateVisual();
         }
 
-        private Rect ScaleRectToCanvas(Rect originalRect)
-        {
-            if (Image == null || imageDisplayRect.Width == 0) return originalRect;
-
-            double scaleX = imageDisplayRect.Width / originalImageDimensions.Width;
-            double scaleY = imageDisplayRect.Height / originalImageDimensions.Height;
-
-            return new Rect(
-                originalRect.X * scaleX + imageDisplayRect.X,
-                originalRect.Y * scaleY + imageDisplayRect.Y,
-                originalRect.Width * scaleX,
-                originalRect.Height * scaleY
-            );
-        }
-
         private List<Point> ScalePolygonToCanvas(List<Point> imagePoints)
         {
             if (Image == null || imagePoints == null || imageDisplayRect.Width == 0) return imagePoints;
@@ -292,21 +268,6 @@ namespace YoableSeg
             return new Point(
                 (canvasPoint.X - imageDisplayRect.X) * scaleX,
                 (canvasPoint.Y - imageDisplayRect.Y) * scaleY
-            );
-        }
-
-        private Rect ScaleRectToImage(Rect canvasRect)
-        {
-            if (Image == null || imageDisplayRect.Width == 0) return canvasRect;
-
-            double scaleX = originalImageDimensions.Width / imageDisplayRect.Width;
-            double scaleY = originalImageDimensions.Height / imageDisplayRect.Height;
-            
-            return new Rect(
-                (canvasRect.X - imageDisplayRect.X) * scaleX,
-                (canvasRect.Y - imageDisplayRect.Y) * scaleY,
-                canvasRect.Width * scaleX,
-                canvasRect.Height * scaleY
             );
         }
 
@@ -428,14 +389,25 @@ namespace YoableSeg
                 dc.DrawGeometry(fillBrush, pen, geometry);
             }
 
-            if (IsDrawingBox)
+            if (isDrawingLoop && loopPoints.Count > 1)
             {
                 string currentColorHex = GetCurrentClassColor();
                 var currentColor = (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(currentColorHex);
                 var currentBrush = new SolidColorBrush(currentColor);
-                var dashPen = new Pen(currentBrush, thickness);
-                dashPen.DashStyle = DashStyles.Dash;
-                dc.DrawRectangle(null, dashPen, CurrentRect);
+                var loopPen = new Pen(currentBrush, thickness + 1);
+                
+                // Draw polyline
+                for (int i = 0; i < loopPoints.Count - 1; i++)
+                {
+                    dc.DrawLine(loopPen, loopPoints[i], loopPoints[i + 1]);
+                }
+                
+                // Draw closing line from last point to first (preview of closed loop)
+                if (loopPoints.Count > 2)
+                {
+                    loopPen.DashStyle = DashStyles.Dash;
+                    dc.DrawLine(loopPen, loopPoints[loopPoints.Count - 1], loopPoints[0]);
+                }
             }
 
             if (IsWaitingForSam)
@@ -520,26 +492,6 @@ namespace YoableSeg
                 return;
             }
 
-            // PRIORITY 2: If we're currently drawing a box, cycle through classes
-            if (IsDrawingBox && availableClasses.Count > 1)
-            {
-                int currentIndex = availableClasses.FindIndex(c => c.ClassId == CurrentClassId);
-
-                if (e.Delta > 0) // Scroll up - previous class
-                {
-                    currentIndex = currentIndex <= 0 ? availableClasses.Count - 1 : currentIndex - 1;
-                }
-                else // Scroll down - next class
-                {
-                    currentIndex = currentIndex >= availableClasses.Count - 1 ? 0 : currentIndex + 1;
-                }
-
-                CurrentClassId = availableClasses[currentIndex].ClassId;
-                OnCurrentClassChanged();
-                e.Handled = true;
-                return;
-            }
-
             if (Keyboard.IsKeyDown(Key.LeftCtrl) || Keyboard.IsKeyDown(Key.RightCtrl))
             {
                 // Existing zoom functionality
@@ -610,7 +562,7 @@ namespace YoableSeg
                 Cursor = Cursors.Arrow;
             }
 
-            if (mouseDownOnEmpty && !IsDrawingBox)
+            if (mouseDownOnEmpty && !isDrawingLoop)
             {
                 double distance = Math.Sqrt(
                     Math.Pow(cursorPosition.X - StartPoint.X, 2) +
@@ -618,19 +570,26 @@ namespace YoableSeg
 
                 if (distance > ClickDragThreshold)
                 {
-                    IsDrawingBox = true;
+                    // Start freehand loop recording
+                    isDrawingLoop = true;
+                    loopPoints.Clear();
+                    loopPoints.Add(StartPoint);
                 }
             }
 
-            if (IsDrawingBox)
+            if (isDrawingLoop)
             {
+                // Record cursor position for loop
                 Point clampedCursor = ClampToBounds(cursorPosition);
-                CurrentRect = new Rect(
-                    Math.Min(StartPoint.X, clampedCursor.X),
-                    Math.Min(StartPoint.Y, clampedCursor.Y),
-                    Math.Abs(clampedCursor.X - StartPoint.X),
-                    Math.Abs(clampedCursor.Y - StartPoint.Y)
-                );
+                
+                // Add point if it's far enough from last point (avoid too many points)
+                if (loopPoints.Count == 0 || 
+                    Math.Sqrt(Math.Pow(clampedCursor.X - loopPoints[loopPoints.Count - 1].X, 2) +
+                              Math.Pow(clampedCursor.Y - loopPoints[loopPoints.Count - 1].Y, 2)) > 2.0)
+                {
+                    loopPoints.Add(clampedCursor);
+                }
+                
                 InvalidateVisual();
                 return;
             }
@@ -654,8 +613,8 @@ namespace YoableSeg
             if (IsWaitingForSam)
             {
                 mouseDownOnEmpty = false;
-                IsDrawingBox = false;
-                CurrentRect = new Rect(0, 0, 0, 0);
+                isDrawingLoop = false;
+                loopPoints.Clear();
                 InvalidateVisual();
                 return;
             }
@@ -665,11 +624,12 @@ namespace YoableSeg
                 Math.Pow(endPoint.X - StartPoint.X, 2) +
                 Math.Pow(endPoint.Y - StartPoint.Y, 2));
 
-            bool wasDrawingBox = IsDrawingBox && CurrentRect.Width > 1 && CurrentRect.Height > 1;
-            Rect savedRect = CurrentRect;
+            bool wasDrawingLoop = isDrawingLoop && loopPoints.Count > 3;
+            List<Point> savedLoop = wasDrawingLoop ? new List<Point>(loopPoints) : null;
 
-            IsDrawingBox = false;
-            CurrentRect = new Rect(0, 0, 0, 0);
+            // Reset drawing state
+            isDrawingLoop = false;
+            loopPoints.Clear();
             mouseDownOnEmpty = false;
 
             if (distance < ClickDragThreshold)
@@ -679,10 +639,9 @@ namespace YoableSeg
                 return;
             }
 
-            if (wasDrawingBox)
+            if (wasDrawingLoop)
             {
-                var imageRect = ScaleRectToImage(savedRect);
-                await RequestSamMaskFromBoxAsync(imageRect);
+                await RequestSamMaskFromLoopAsync(savedLoop);
             }
 
             InvalidateVisual();
@@ -767,11 +726,11 @@ namespace YoableSeg
             }
         }
 
-        private async Task RequestSamMaskFromBoxAsync(Rect imageBox)
+        private async Task RequestSamMaskFromLoopAsync(List<Point> canvasLoop)
         {
-            if (RequestSamMask == null)
+            if (RequestLoopMask == null)
             {
-                System.Diagnostics.Debug.WriteLine("RequestSamMask event is null!");
+                System.Diagnostics.Debug.WriteLine("RequestLoopMask event is null!");
                 return;
             }
 
@@ -780,23 +739,61 @@ namespace YoableSeg
 
             try
             {
-                var centerPoint = new Point(
-                    imageBox.X + imageBox.Width / 2,
-                    imageBox.Y + imageBox.Height / 2);
-
-                var polygonPoints = await RequestSamMask(centerPoint, imageBox);
+                // Convert loop points from canvas to image coordinates
+                var imageLoop = canvasLoop.Select(p => ScalePointToImage(p)).ToList();
+                
+                // Check special case: does loop end inside the same label it started in?
+                int? finalStartingLabelIndex = null;
+                
+                if (startingLabel != null && startingLabelIndex.HasValue)
+                {
+                    var imageEndPoint = ScalePointToImage(canvasLoop[canvasLoop.Count - 1]);
+                    
+                    // Check if end point is also inside the starting label
+                    if (startingLabel.ContainsPoint(imageEndPoint))
+                    {
+                        // Check if loop ever exited the label
+                        bool exitedLabel = false;
+                        for (int i = 1; i < imageLoop.Count - 1; i++)
+                        {
+                            if (!startingLabel.ContainsPoint(imageLoop[i]))
+                            {
+                                exitedLabel = true;
+                                break;
+                            }
+                        }
+                        
+                        if (exitedLabel)
+                        {
+                            // Special case confirmed: loop started inside, exited, and returned
+                            finalStartingLabelIndex = startingLabelIndex;
+                            System.Diagnostics.Debug.WriteLine($"Special case: loop started and ended inside label {startingLabelIndex}");
+                        }
+                    }
+                }
+                
+                // Call the loop-based mask request
+                var polygonPoints = await RequestLoopMask(imageLoop, Labels, finalStartingLabelIndex);
                 
                 if (polygonPoints == null)
                 {
-                    System.Diagnostics.Debug.WriteLine("SAM returned null - SAM3 may not be running");
+                    System.Diagnostics.Debug.WriteLine("SAM loop mask returned null - likely rejected by NMS (too similar to existing label) or processing failed");
                 }
                 else if (polygonPoints.Count < 3)
                 {
-                    System.Diagnostics.Debug.WriteLine($"SAM returned too few points: {polygonPoints.Count}");
+                    System.Diagnostics.Debug.WriteLine($"SAM loop mask returned too few points: {polygonPoints.Count}");
                 }
                 else
                 {
                     OnBeforeLabelChange();
+                    
+                    // Special case: remove the starting label if loop started/ended inside it
+                    if (finalStartingLabelIndex.HasValue && finalStartingLabelIndex.Value >= 0 && finalStartingLabelIndex.Value < Labels.Count)
+                    {
+                        var labelToRemove = Labels[finalStartingLabelIndex.Value];
+                        Labels.RemoveAt(finalStartingLabelIndex.Value);
+                    }
+                    
                     var newLabel = new LabelData($"Label {Labels.Count + 1}", polygonPoints, CurrentClassId);
                     Labels.Add(newLabel);
 
@@ -810,12 +807,14 @@ namespace YoableSeg
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine($"SAM mask request failed: {ex.Message}");
+                System.Diagnostics.Debug.WriteLine($"SAM loop mask request failed: {ex.Message}");
                 System.Diagnostics.Debug.WriteLine($"Stack trace: {ex.StackTrace}");
             }
             finally
             {
                 IsWaitingForSam = false;
+                startingLabel = null;
+                startingLabelIndex = null;
                 InvalidateVisual();
             }
         }
@@ -829,16 +828,21 @@ namespace YoableSeg
             Point mousePos = e.GetPosition(this);
             StartPoint = mousePos;
             mouseDownOnEmpty = true;
-            CurrentRect = new Rect(StartPoint, new Size(0, 0));
 
+            // Check if mouse is pressed inside an existing label
             var imageMousePos = ScalePointToImage(mousePos);
             mouseDownLabel = null;
+            startingLabel = null;
+            startingLabelIndex = null;
+            
             for (int i = Labels.Count - 1; i >= 0; i--)
             {
                 var label = Labels[i];
                 if (label.IsValid() && label.ContainsPoint(imageMousePos))
                 {
                     mouseDownLabel = label;
+                    startingLabel = label;
+                    startingLabelIndex = i;
                     break;
                 }
             }

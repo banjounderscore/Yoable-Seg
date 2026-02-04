@@ -469,25 +469,25 @@ namespace YoableSeg.Properties {
         
         [global::System.Configuration.UserScopedSettingAttribute()]
         [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
-        [global::System.Configuration.DefaultSettingValueAttribute("0.25")]
-        public float TextThreshold {
+        [global::System.Configuration.DefaultSettingValueAttribute("0.5")]
+        public float ScoreThreshold {
             get {
-                return ((float)(this["TextThreshold"]));
+                return ((float)(this["ScoreThreshold"]));
             }
             set {
-                this["TextThreshold"] = value;
+                this["ScoreThreshold"] = value;
             }
         }
         
         [global::System.Configuration.UserScopedSettingAttribute()]
         [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
-        [global::System.Configuration.DefaultSettingValueAttribute("0.25")]
-        public float BoxThreshold {
+        [global::System.Configuration.DefaultSettingValueAttribute("0.5")]
+        public float MaskThreshold {
             get {
-                return ((float)(this["BoxThreshold"]));
+                return ((float)(this["MaskThreshold"]));
             }
             set {
-                this["BoxThreshold"] = value;
+                this["MaskThreshold"] = value;
             }
         }
         
@@ -529,7 +529,7 @@ namespace YoableSeg.Properties {
         
         [global::System.Configuration.UserScopedSettingAttribute()]
         [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
-        [global::System.Configuration.DefaultSettingValueAttribute("humanoid character\r\nhuman-shaped body\r\nplayer character")]
+        [global::System.Configuration.DefaultSettingValueAttribute("person")]
         public string LastAutoLabelPrompts {
             get {
                 return ((string)(this["LastAutoLabelPrompts"]));
@@ -541,7 +541,19 @@ namespace YoableSeg.Properties {
         
         [global::System.Configuration.UserScopedSettingAttribute()]
         [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
-        [global::System.Configuration.DefaultSettingValueAttribute("0.6")]
+        [global::System.Configuration.DefaultSettingValueAttribute("")]
+        public string LastAutoLabelNegativePrompts {
+            get {
+                return ((string)(this["LastAutoLabelNegativePrompts"]));
+            }
+            set {
+                this["LastAutoLabelNegativePrompts"] = value;
+            }
+        }
+        
+        [global::System.Configuration.UserScopedSettingAttribute()]
+        [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
+        [global::System.Configuration.DefaultSettingValueAttribute("0.3")]
         public float MinSam3Confidence {
             get {
                 return ((float)(this["MinSam3Confidence"]));

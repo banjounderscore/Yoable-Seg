@@ -1,7 +1,7 @@
-# YoableSeg SAM3 with Grounding DINO Installation Script
+# YoableSeg SAM3 Installation Script
 
 Write-Host "==================================================" -ForegroundColor Cyan
-Write-Host "YoableSeg SAM3 + Grounding DINO Installation" -ForegroundColor Cyan
+Write-Host "YoableSeg SAM3 Installation" -ForegroundColor Cyan
 Write-Host "==================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -71,8 +71,8 @@ if ($needsInstall) {
         exit 1
     }
 
-    Write-Host "Installing Grounding DINO and SAM3 dependencies..." -ForegroundColor Gray
-    & $pipPath install "transformers>=4.47.0" accelerate fastapi uvicorn pillow opencv-python numpy pydantic tqdm scipy 2>&1 | Out-Null
+    Write-Host "Installing SAM3 dependencies..." -ForegroundColor Gray
+    & $pipPath install "transformers>=4.47.0" accelerate fastapi uvicorn pillow opencv-python numpy pydantic tqdm scipy shapely 2>&1 | Out-Null
 
     if ($LASTEXITCODE -ne 0) {
         Write-Host "ERROR: Failed to install packages" -ForegroundColor Red
@@ -85,14 +85,24 @@ if ($needsInstall) {
     Write-Host "Packages already installed, skipping" -ForegroundColor Green
 }
 
-# HuggingFace login
+# HuggingFace login (SAM3 is a gated model)
 Write-Host ""
 Write-Host "[4/5] HuggingFace Authentication" -ForegroundColor Yellow
-& hf auth login
+Write-Host "SAM3 requires HuggingFace authentication (gated model)" -ForegroundColor Gray
+Write-Host "If you haven't already, accept the license at: https://huggingface.co/facebook/sam3" -ForegroundColor Gray
+
+$hfPath = Join-Path $venvPath "Scripts\huggingface-cli.exe"
+if (Test-Path $hfPath) {
+    & $hfPath login
+} else {
+    Write-Host "Installing huggingface_hub..." -ForegroundColor Gray
+    & $pipPath install huggingface_hub 2>&1 | Out-Null
+    & $pythonExe -m huggingface_hub.commands.huggingface_cli login
+}
 
 # Download Models
 Write-Host ""
-Write-Host "[5/5] Downloading AI Models..." -ForegroundColor Yellow
+Write-Host "[5/5] Downloading SAM3 Model..." -ForegroundColor Yellow
 
 $scriptPath = Join-Path $serviceDir "download_models.py"
 @"
@@ -119,26 +129,26 @@ def check_model_cached(model_id):
         return False
 
 def download_sam3():
-    print('[1/2] Checking SAM3 (Segment Anything Model 3)...')
-    print('  Using SAM3 instead of SAM2 as requested')
+    print('Checking SAM3 (Segment Anything Model 3)...')
+    print('  SAM3 supports text-prompt concept segmentation')
     if check_model_cached('facebook/sam3'):
         print('  SAM3 already downloaded, skipping')
         return True
     
-    print('  Downloading SAM3 from HuggingFace (~3.5GB)...')
+    print('  Downloading SAM3 from HuggingFace...')
     print('  SAM3 is the latest segmentation model from Meta')
     print('  This may take several minutes...')
     try:
-        from transformers import Sam3TrackerProcessor, Sam3TrackerModel
-        
         print('  [1/2] Downloading SAM3 processor...')
-        processor = Sam3TrackerProcessor.from_pretrained(
+        from transformers import Sam3Processor
+        processor = Sam3Processor.from_pretrained(
             'facebook/sam3', 
             trust_remote_code=True
         )
         
         print('  [2/2] Downloading SAM3 model (this is the large file)...')
-        model = Sam3TrackerModel.from_pretrained(
+        from transformers import Sam3Model
+        model = Sam3Model.from_pretrained(
             'facebook/sam3', 
             trust_remote_code=True, 
             ignore_mismatched_sizes=True
@@ -148,48 +158,25 @@ def download_sam3():
         return True
     except Exception as e:
         print(f'  WARNING: SAM3 download failed: {e}')
-        return False
-
-def download_grounding_dino():
-    print('')
-    print('[2/2] Checking GroundingDINO Base (Text-to-Detection)...')
-    print('  GroundingDINO enables detection with text prompts')
-    if check_model_cached('IDEA-Research/grounding-dino-base'):
-        print('  GroundingDINO Base already downloaded, skipping')
-        return True
-    
-    print('  Downloading GroundingDINO Base from HuggingFace (~933MB)...')
-    try:
-        from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-        
-        print('  [1/2] Downloading GroundingDINO Base processor...')
-        processor = AutoProcessor.from_pretrained('IDEA-Research/grounding-dino-base')
-        
-        print('  [2/2] Downloading GroundingDINO Base model...')
-        model = AutoModelForZeroShotObjectDetection.from_pretrained('IDEA-Research/grounding-dino-base')
-        
-        print('  GroundingDINO Base downloaded successfully!')
-        return True
-    except Exception as e:
-        print(f'  WARNING: GroundingDINO Base download failed: {e}')
+        import traceback
+        traceback.print_exc()
         return False
 
 print('')
-print('Downloading AI models for YoableSeg...')
-print('Pipeline: Grounding DINO (detect) -> SAM3 (segment)')
+print('Downloading SAM3 for YoableSeg...')
+print('SAM3 enables text-prompt auto-labeling (e.g., "person", "car")')
 print('This may take several minutes on first run.')
 print('')
 
 sam3_ok = download_sam3()
-dino_ok = download_grounding_dino()
 
-if not sam3_ok or not dino_ok:
+if not sam3_ok:
     print('')
-    print('WARNING: Some models failed to download.')
+    print('WARNING: SAM3 failed to download.')
     sys.exit(1)
 
 print('')
-print('All models downloaded successfully!')
+print('SAM3 downloaded successfully!')
 "@ | Set-Content -Path $scriptPath -Encoding UTF8
 
 & $pythonExe $scriptPath
@@ -204,7 +191,7 @@ if ($downloadResult -eq 0) {
     Write-Host "==================================================" -ForegroundColor Green
 } else {
     Write-Host ""
-    Write-Host "WARNING: Some models failed to download. They will be downloaded on first use." -ForegroundColor Yellow
+    Write-Host "WARNING: SAM3 failed to download. It will be downloaded on first use." -ForegroundColor Yellow
 }
 
 Write-Host ""

@@ -154,37 +154,51 @@ namespace YoableSeg.Managers
             }
         }
 
-        public async Task<(bool success, double[][] polygon)> RequestBoxMaskAsync(
-            string imagePath, 
-            double x1, 
-            double y1, 
-            double x2, 
-            double y2, 
-            double simplification = -1,
-            List<List<double[]>> existingPolygons = null,
-            double nmsIouThreshold = 0.5)
+        public async Task<(bool success, double[][] polygon)> RequestLoopMaskAsync(
+            string imagePath,
+            List<Point> loopPoints,
+            List<List<double[]>> existingLabels = null,
+            int? startingLabelId = null,
+            double simplification = -1)
         {
             try
             {
                 if (simplification < 0)
                     simplification = Properties.Settings.Default.PolygonSimplificationTolerance;
 
+                // Convert WPF Points to double arrays
+                var loopPointsArray = loopPoints.Select(p => new[] { p.X, p.Y }).ToList();
+
                 var request = new
                 {
                     image_path = imagePath,
-                    box = new[] { x1, y1, x2, y2 },
+                    loop_points = loopPointsArray,
+                    existing_labels = existingLabels,
+                    starting_label_id = startingLabelId,
                     simplification = simplification,
-                    min_sam3_confidence = Properties.Settings.Default.MinSam3Confidence,
-                    existing_polygons = existingPolygons,
-                    nms_iou_threshold = nmsIouThreshold
+                    min_sam3_confidence = Properties.Settings.Default.MinSam3Confidence
                 };
 
                 var json = JsonSerializer.Serialize(request);
                 var content = new StringContent(json, Encoding.UTF8, "application/json");
-                var response = await _httpClient.PostAsync($"http://localhost:{_port}/box_to_mask", content);
+                var response = await _httpClient.PostAsync($"http://localhost:{_port}/loop_to_mask", content);
                 
                 if (!response.IsSuccessStatusCode)
+                {
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    
+                    // 409 Conflict means the polygon was rejected by NMS (too similar to existing label)
+                    if ((int)response.StatusCode == 409)
+                    {
+                        Debug.WriteLine($"Loop polygon rejected by NMS: too similar to existing label");
+                    }
+                    else
+                    {
+                        Debug.WriteLine($"RequestLoopMaskAsync HTTP error: {response.StatusCode} - {errorContent}");
+                    }
+                    
                     return (false, null);
+                }
 
                 var resultJson = await response.Content.ReadAsStringAsync();
                 var result = JsonSerializer.Deserialize<MaskResponse>(resultJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -193,7 +207,7 @@ namespace YoableSeg.Managers
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"RequestBoxMaskAsync error: {ex.Message}");
+                Debug.WriteLine($"RequestLoopMaskAsync error: {ex.Message}");
                 return (false, null);
             }
         }
@@ -201,10 +215,10 @@ namespace YoableSeg.Managers
         public async Task<List<AutoLabelResult>> RequestAutoLabelAsync(
             string imagePath, 
             List<string> prompts, 
-            Dictionary<string, int> promptToClassMapping,
-            float textThreshold,
-            float boxThreshold,
+            float scoreThreshold,
+            float maskThreshold,
             int maxInstances,
+            List<string> negativePrompts = null,
             double simplification = -1,
             List<List<double[]>> existingPolygons = null,
             double nmsIouThreshold = 0.5)
@@ -218,11 +232,11 @@ namespace YoableSeg.Managers
                 {
                     image_path = imagePath,
                     prompts = prompts,
-                    text_threshold = textThreshold,
-                    box_threshold = boxThreshold,
+                    negative_prompts = negativePrompts,
+                    score_threshold = scoreThreshold,
+                    mask_threshold = maskThreshold,
                     max_instances = maxInstances,
                     simplification = simplification,
-                    min_sam3_confidence = Properties.Settings.Default.MinSam3Confidence,
                     existing_polygons = existingPolygons,
                     nms_iou_threshold = nmsIouThreshold
                 };
@@ -243,16 +257,13 @@ namespace YoableSeg.Managers
                 var labelResults = new List<AutoLabelResult>();
                 foreach (var instance in result.instances)
                 {
-                    if (promptToClassMapping.TryGetValue(instance.phrase.ToLower(), out int classId))
+                    labelResults.Add(new AutoLabelResult
                     {
-                        labelResults.Add(new AutoLabelResult
-                        {
-                            polygon = instance.polygon,
-                            classId = classId,
-                            score = instance.score,
-                            phrase = instance.phrase
-                        });
-                    }
+                        polygon = instance.polygon,
+                        classId = 0,
+                        score = instance.score,
+                        phrase = instance.phrase
+                    });
                 }
 
                 return labelResults;
@@ -358,7 +369,6 @@ namespace YoableSeg.Managers
 
         private class AutoLabelInstance
         {
-            public double[] box { get; set; }
             public double score { get; set; }
             public string phrase { get; set; }
             public double[][] polygon { get; set; }

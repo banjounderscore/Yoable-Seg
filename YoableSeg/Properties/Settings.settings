@@ -113,11 +113,11 @@
     <Setting Name="ClickDragThreshold" Type="System.Double" Scope="User">
       <Value Profile="(Default)">3</Value>
     </Setting>
-    <Setting Name="TextThreshold" Type="System.Single" Scope="User">
-      <Value Profile="(Default)">0.25</Value>
+    <Setting Name="ScoreThreshold" Type="System.Single" Scope="User">
+      <Value Profile="(Default)">0.5</Value>
     </Setting>
-    <Setting Name="BoxThreshold" Type="System.Single" Scope="User">
-      <Value Profile="(Default)">0.25</Value>
+    <Setting Name="MaskThreshold" Type="System.Single" Scope="User">
+      <Value Profile="(Default)">0.5</Value>
     </Setting>
     <Setting Name="MaxInstancesPerImage" Type="System.Int32" Scope="User">
       <Value Profile="(Default)">50</Value>
@@ -129,12 +129,13 @@
       <Value Profile="(Default)">58000</Value>
     </Setting>
     <Setting Name="LastAutoLabelPrompts" Type="System.String" Scope="User">
-      <Value Profile="(Default)">humanoid character
-human-shaped body
-player character</Value>
+      <Value Profile="(Default)">person</Value>
+    </Setting>
+    <Setting Name="LastAutoLabelNegativePrompts" Type="System.String" Scope="User">
+      <Value Profile="(Default)"></Value>
     </Setting>
     <Setting Name="MinSam3Confidence" Type="System.Single" Scope="User">
-      <Value Profile="(Default)">0.6</Value>
+      <Value Profile="(Default)">0.3</Value>
     </Setting>
     <Setting Name="NmsIouThreshold" Type="System.Double" Scope="User">
       <Value Profile="(Default)">0.5</Value>
